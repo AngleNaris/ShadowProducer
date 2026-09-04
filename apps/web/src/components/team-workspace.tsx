@@ -1,0 +1,195 @@
+"use client"
+
+import type { AuditLog, WorkspaceContext } from "@shadowproducer/contracts"
+import { useQuery } from "@tanstack/react-query"
+import { ArrowUpRight, Film } from "lucide-react"
+
+import { Button } from "@/components/ui/button"
+import {
+  EmptyState,
+  PageFrame,
+  SectionHeader,
+  WorkspaceHeader,
+  workspaceCardGridClassName,
+  workspaceInteractiveCardClassName,
+} from "@/components/workspace/page-elements"
+import type { ProjectId } from "@/components/workspace/workspace-data"
+import { workspaceApi } from "@/lib/api-client"
+import { cn } from "@/lib/utils"
+
+type WorkspaceTeam = WorkspaceContext["teams"][number]
+
+const activityTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+})
+
+function subjectLabel(item: AuditLog) {
+  for (const key of ["title", "name", "label", "fileName"]) {
+    const value = item.metadata[key]
+    if (typeof value === "string" && value.trim()) return value
+  }
+  return item.subjectId
+}
+
+export function TeamOverview({
+  team,
+  onProjectChange,
+}: {
+  team: WorkspaceTeam
+  onProjectChange: (projectId: ProjectId) => void
+}) {
+  const permissionsQuery = useQuery({
+    queryKey: ["team-permissions", team.id],
+    queryFn: () => workspaceApi.getPermissions(team.id),
+  })
+  const activitiesQuery = useQuery({
+    queryKey: ["team-overview-activities", team.id],
+    queryFn: () => workspaceApi.listAuditLogs(team.id, { pageSize: 8 }),
+  })
+  const projects = team.projects
+
+  return (
+    <PageFrame>
+      <WorkspaceHeader title="团队概览" />
+      <div data-scroll-owner className="min-h-0 flex-1 overflow-auto">
+        <section className="border-b border-border">
+          <SectionHeader
+            title="项目概览"
+            detail={`${team.name} · ${projects.length} 个项目`}
+          />
+          <div
+            className={cn(
+              workspaceCardGridClassName,
+              "px-3 pb-4 sm:grid-cols-2 lg:grid-cols-4",
+            )}
+          >
+            {projects.map((project) => (
+              <button
+                key={project.id}
+                type="button"
+                onClick={() => onProjectChange(project.id)}
+                className={cn(
+                  workspaceInteractiveCardClassName,
+                  "group p-3 text-left hover:bg-muted/30",
+                )}
+              >
+                <div className="grid aspect-[16/7] place-items-center border border-border bg-muted/45 text-muted-foreground transition-colors group-hover:bg-muted group-focus-visible:bg-muted">
+                  <span className="flex items-center gap-2 text-xs">
+                    <Film className="size-4" aria-hidden="true" />
+                    暂无项目封面
+                  </span>
+                </div>
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <span className="min-w-0">
+                    <strong className="block truncate text-sm font-semibold">
+                      {project.name}
+                    </strong>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      我的角色 · {project.role}
+                    </span>
+                  </span>
+                  <ArrowUpRight className="size-4 shrink-0 text-muted-foreground group-hover:text-primary" />
+                </div>
+              </button>
+            ))}
+            {!projects.length ? (
+              <EmptyState
+                title="这个团队还没有项目"
+                detail="项目创建或授权后会显示在这里。"
+                className="sm:col-span-2 lg:col-span-4"
+              />
+            ) : null}
+          </div>
+        </section>
+
+        <div className="grid lg:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.7fr)]">
+          <section className="border-r border-border">
+            <SectionHeader
+              title="团队中的所有动态"
+              detail="每条动态标明项目与业务模块来源"
+            />
+            <div className="divide-y divide-border">
+              {activitiesQuery.isPending ? (
+                <EmptyState title="正在载入团队动态" />
+              ) : activitiesQuery.isError ? (
+                <EmptyState
+                  title="团队动态载入失败"
+                  detail={activitiesQuery.error.message}
+                  action={
+                    <Button variant="outline" onClick={() => activitiesQuery.refetch()}>
+                      重试
+                    </Button>
+                  }
+                />
+              ) : !activitiesQuery.data.items.length ? (
+                <EmptyState title="还没有团队动态" />
+              ) : null}
+              {activitiesQuery.data?.items.map((activity) => (
+                <div
+                  key={activity.id}
+                  className="grid gap-2 px-4 py-3 sm:grid-cols-[1fr_auto]"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">
+                      {subjectLabel(activity)}
+                    </div>
+                    <div className="mt-1 truncate text-xs text-muted-foreground">
+                      {activity.projectName ?? "团队范围"} · {activity.action}
+                    </div>
+                  </div>
+                  <div className="text-left text-xs text-muted-foreground sm:text-right">
+                    <div>{activity.actorName}</div>
+                    <div>
+                      {activityTimeFormatter.format(new Date(activity.createdAt))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+          <section>
+            <SectionHeader title="团队成员" detail={`${team.memberCount} 位成员`} />
+            <div className="divide-y divide-border">
+              {permissionsQuery.isPending ? (
+                <EmptyState title="正在载入团队成员" />
+              ) : permissionsQuery.isError ? (
+                <EmptyState
+                  title="团队成员载入失败"
+                  detail={permissionsQuery.error.message}
+                  action={
+                    <Button variant="outline" onClick={() => permissionsQuery.refetch()}>
+                      重试
+                    </Button>
+                  }
+                />
+              ) : !permissionsQuery.data.members.length ? (
+                <EmptyState title="还没有团队成员" />
+              ) : null}
+              {permissionsQuery.data?.members.map((member) => (
+                <div key={member.accountId} className="flex items-center gap-3 px-4 py-3">
+                  <span className="grid size-8 place-items-center border border-border bg-muted text-xs font-semibold">
+                    {member.displayName.slice(0, 1)}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">
+                      {member.displayName}
+                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {member.role}
+                    </span>
+                  </span>
+                  <span className="max-w-24 truncate text-xs text-muted-foreground">
+                    {member.permissionTemplateName ?? `${member.projects.length} 个项目`}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      </div>
+    </PageFrame>
+  )
+}

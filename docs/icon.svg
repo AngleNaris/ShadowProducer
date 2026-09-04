@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="400" height="400">
+  <title>ShadowProducer</title>
+  <rect width="200" height="200" fill="#000000" />
+
+  <path fill="#FFFFFF" fill-rule="evenodd" d="M36 64H164V164H36ZM46 74V154H154V74Z" />
+  <path fill="#FFFFFF" fill-rule="evenodd" d="M52 82H120V126H52ZM60 90V118H112V90Z" />
+  <rect x="128" y="84" width="20" height="6" fill="#FFFFFF" />
+  <rect x="128" y="98" width="12" height="5" fill="#FFFFFF" />
+  <rect x="144" y="98" width="4" height="5" fill="#FFFFFF" />
+  <rect x="128" y="111" width="20" height="6" fill="#FFFFFF" />
+
+  <rect x="52" y="132" width="96" height="4" fill="#FFFFFF" />
+  <rect x="58" y="126" width="8" height="16" fill="#FFFFFF" />
+  <rect x="96" y="126" width="8" height="16" fill="#FFFFFF" />
+  <rect x="134" y="126" width="8" height="16" fill="#FFFFFF" />
+
+  <g transform="rotate(-8 36 60)">
+    <rect x="36" y="36" width="128" height="22" fill="#FFFFFF" />
+    <polygon points="52,36 66,36 54,58 40,58" fill="#000000" />
+    <polygon points="82,36 96,36 84,58 70,58" fill="#000000" />
+    <polygon points="112,36 126,36 114,58 100,58" fill="#000000" />
+    <polygon points="142,36 156,36 144,58 130,58" fill="#000000" />
+  </g>
+
+  <rect x="32" y="54" width="12" height="12" fill="#FFFFFF" />
+  <rect x="36" y="58" width="4" height="4" fill="#000000" />
+</svg>

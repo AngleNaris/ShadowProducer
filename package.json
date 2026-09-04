@@ -1,0 +1,23 @@
+{
+  "name": "shadowproducer",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.20.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "turbo dev --filter=@shadowproducer/web",
+    "dev:api": "pnpm --filter @shadowproducer/api dev",
+    "db:migrate": "pnpm --filter @shadowproducer/api db:migrate",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "test": "turbo test",
+    "typecheck": "turbo typecheck"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.10",
+    "turbo": "2.10.11",
+    "typescript": "7.0.2"
+  }
+}
