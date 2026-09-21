@@ -3422,4 +3422,61 @@
 
 - 当前 Web 权限页只接入 team-scope 邀请 UI；后端已支持 project-scope invitation，但 project invitation UI 不宣称在本轮完成。
 - 本轮没有配置或依赖真实第三方 AI provider、SMTP、真实邮件发送或媒体处理；不把 AI 能力伪装成可用。模型识别、embedding、邮件投递和目标环境供应商兼容性仍需后续凭据与环境验收。
-- 本轮没有执行 destructive git 操作；临时 PostgreSQL 测试数据按唯一 run 前缀清理，未修改既有 seeded 业务数据。
+
+## 132. 2026-09-04 P1 onboarding project-only 与一致性回归收口
+
+在第 131 章 onboarding 闭环基础上，本轮继续修复项目级外部协作者入口、通知/审计隔离和邀请写入边界；AI provider、SMTP、真实邮件投递和真实媒体处理仍不作为执行依赖：
+
+- project-scope invitation 接受后只写入 `project_memberships`，不会自动伪造 `team_memberships`；项目访问解析在没有团队成员关系时只授予项目模板能力，团队成员的既有“项目权限受团队权限收紧”规则保持不变。
+- project-only 账号的 workspace context 返回 `role: null`、`memberCount: 0`，仅包含实际可访问的项目；默认路由进入项目空间。桌面侧边栏、移动端菜单、全局搜索和通知跳转均过滤团队级入口，不能借项目入口进入团队资源、权限或团队写操作。
+- project-only 通知查询只返回存在对应项目成员关系的项目通知，不能读取 `project_id IS NULL` 的团队通知；team-scope audit 对 project-only 账号返回空结果，project-scope audit 仅返回其项目范围记录。权限工作区仍可供团队管理员查看项目-only 成员，但团队权限槽位明确显示“仅项目成员，无团队权限”，分配团队模板不会伪造成员身份。
+- 邀请创建入口继续执行邮箱 trim/lowercase 和格式校验；同作用域已有成员返回 `INVITATION_MEMBER_EXISTS`/409，pending partial unique index 竞争稳定映射为 `INVITATION_PENDING_EXISTS`/409。一次性明文 token 只在首次创建响应和当前创建页面上下文出现，数据库、列表和 receipt 只保存 hash/summary。
+
+自动化与真实数据库验证：
+
+- `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 全部通过；API 单元测试 `206/206`、Web 单元测试 `66/66`，Next.js `16.3.2` 生产构建成功。构建仅保留 Turbo 对 API 无输出文件的配置警告，不影响退出码。
+- `pnpm --filter @shadowproducer/api test:postgres` 通过：10 个 PostgreSQL 测试文件、`67/67` tests；onboarding 专项 `6/6` 通过，新增覆盖 project-only 接受后的无团队成员关系、项目访问、团队访问拒绝、项目-only context、通知隔离、团队/项目审计隔离、权限工作区合并、团队模板分配拒绝、同作用域成员拒绝和并发 pending 邀请冲突。
+- `apps/api/src/workspace-onboarding-api.test.ts` 通过 `5/5`，新增覆盖 project preview/accept、非法邮箱边界 `400`、pending conflict `409`，并保留 session actor 覆盖伪造 header 的断言。
+
+真实 GUI 回归与视觉证据：
+
+- `pnpm --filter @shadowproducer/web-e2e exec playwright test --workers=1` 通过 `29 passed / 7 skipped`，共 36 项，包含 desktop 和 mobile；核心登录、注册、无团队 onboarding、创建团队/首个项目、跳过项目、团队邀请创建、匹配邮箱接受、失效 token 和退出登录流程均由真实可见 GUI 完成，未注入 cookie、sessionStorage、数据库记录、点击事件或认证绕过。
+- 受控浏览器人工检查真实打开了登录和注册页面；DOM 快照与截图均显示产品标识、中文表单、最小密码长度提示和注册/返回登录控件。证据：`output/playwright/onboarding-live-login-1280x720.png`、`output/playwright/onboarding-live-registration-1280x720.png`。`1280x720` 页面几何无横向溢出；`768x1024` 只读几何检查返回 `scrollWidth=768`、`bodyWidth=768`，无横向溢出。
+- 本轮内置浏览器的部分截图请求因后端截图任务超时，未取得 `375x812`、`1024x768`、`1440x1000`、`1920x1080` 和 `200%` zoom 的独立截图证据；这些尺寸不计为已完成的人工视觉验收。Playwright 已有 desktop `1440x900` 与 Pixel 7 mobile 的真实交互结果，7 个条件性 workspace/media 流程按测试设计跳过。
+
+已知未收口风险与明确边界：
+
+- 首次创建邀请响应丢失后的明文 token 恢复/resend 通道仍未实现；由于安全边界禁止把 token 写入 receipt、列表或数据库，不能把新幂等键重试当作 token 找回方案。
+- 相同幂等键并发请求在 receipt 写入竞争时的重读/回放语义仍需单独处理和验证；本轮已覆盖 pending invitation 的并发唯一性，但不把它等同于 receipt race 已解决。
+- 团队回收站 restore/permanent delete 权限的更细粒度策略、日期 `date-time`/`date` 的 AJV 实际格式校验和通知分页仍属于后续风险评估项。
+- 权限页本轮仍只接入 team-scope 邀请创建 UI；project-scope invitation 后端已可用，但 project invitation UI 不宣称完成。真实 AI provider、SMTP、邮件发送和媒体处理仍未配置或接入。
+
+## 133. 2026-09-04 P1 onboarding 与 workspace 最终一致性验证
+
+本轮收口第 131、132 章遗留的幂等竞态、邀请生命周期、共享回收站、日期输入、通知分页和 E2E 环境问题；AI provider、SMTP、真实邮件投递和真实媒体处理继续明确排除：
+
+- 邀请 token rotate/resend 已接入 API、service、PostgreSQL 和 team-scope 权限页。新 token 使用安全随机源，旧 token 立即失效；明文 token 只在首次响应和当前页面状态出现，receipt、列表、审计 metadata 和数据库只保存 hash/summary。accepted、revoked、expired、not-found 和 stale revision 分别映射到稳定的 410、404 或 409 语义。
+- 通用 receipt-backed 命令在同一事务内、读取 receipt 前取得 `pg_advisory_xact_lock`；相同幂等键并发创建/接受邀请只产生一次业务写入、一次审计、一次通知和一次 receipt，另一响应稳定 replay；同 key 换 payload 返回 `IDEMPOTENCY_KEY_REUSED`/409。
+- 团队共享回收站新增 `team.recycle.manage` capability。普通 team member 仍可处理个人 task/calendar/note 回收项，但不能恢复或永久删除 team-contact/supplier；管理员和 legacy owner/admin/producer/director 保留共享资源管理能力，Web 同步按 `canManageShared` 隐藏受保护按钮，后端 gate 仍是最终边界。
+- workspace context 的 `memberCount` 改为按团队一次 `GROUP BY` 聚合回填；project-only 虚拟团队继续返回 `role: null`、`memberCount: 0`，不扩大团队访问范围。
+- 通知列表支持 `page`/`pageSize`、稳定排序、`total` 和全量可见范围的 `unreadCount`；Web popover 支持追加去重、加载更多、刷新回第一页和操作后失效缓存。project-only 过滤继续排除 `project_id IS NULL` 团队通知。
+- 日期输入同时检查 ISO 形状和真实年月日组合；`2026-02-31` 以及对应日期时间被拒绝为 `INVALID_DATE`/400，合法但倒序的日程范围仍返回 `INVALID_CALENDAR_RANGE`/400；Agent 日程更新不再把非法日期泄漏为 `RangeError`/500。
+- 迁移兼容性修复统一了历史通知 CHECK 约束重放路径：`026`、`070`、`071`、`072`、`076` 均接受当前契约的 13 种通知 kind，避免早期中间约束在重放时拒绝已存在的后续合法数据。真实数据库连续执行 `pnpm db:migrate` 两次成功；通知从 15 条历史 `team_invitation_accepted` 保留为 E2E 后的 17 条，非法 kind 查询为 0，没有删除或改写通知数据。
+
+工程与真实数据库验证：
+
+- `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 全部通过；API 单元测试 `211/211`，Web 原生测试 `66/66`，Next.js `16.3.2` 生产构建成功。构建只保留 Turbo 关于 API 没有输出文件的配置警告，不影响退出码。
+- `pnpm --filter @shadowproducer/api test:postgres` 通过：10 个 PostgreSQL 测试文件、`69/69` tests；onboarding 专项 `8/8`，workspace repository 专项 `15/15`，覆盖 rotate/revoke 状态、同 key 并发 create/accept、不同 payload 冲突、通知分页和 project-only 隔离、共享回收站 capability、memberCount 聚合与日期边界。
+- `apps/api/src/workspace-onboarding.test.ts`、`apps/api/src/workspace-onboarding-api.test.ts` 和 `apps/api/src/app.test.ts` 的 rotate、revoke、project invitation 与 Agent 非法日期回归均通过；未配置或调用真实 AI provider、SMTP、邮件投递、转写/OCR/视觉分析/embedding 或媒体处理服务。
+
+真实 GUI 回归：
+
+- 使用隔离的 API `3230`、Web `3011` 和真实 PostgreSQL 执行 `E2E_WEB_PORT=3011 E2E_API_PORT=3230 pnpm --filter @shadowproducer/web-e2e exec playwright test --workers=1`，结果为 `29 passed / 7 skipped`，共 36 项，无失败，覆盖 desktop 与 Pixel 7 mobile。
+- 登录、空提交原生校验、错误密码、未知账号、自助注册、无团队 onboarding、创建团队及首个项目、跳过项目、seed 账号团队选择、team-scope 邀请创建、匹配邮箱注册/接受、旧 token 失效、退出登录、桌面导航/项目切换/团队切换/未知 hash 回退、任务创建和移动端紧凑导航均通过真实可见 UI 操作完成；未注入 cookie、sessionStorage、数据库记录、点击事件或认证绕过。
+- 7 项跳过均为既有条件：桌面专属/移动端专属导航互斥项，以及 deterministic seed 没有 media-ready review version 时的客户审片流程；不把条件性 skip 记作失败。为支持真正隔离运行，E2E 配置让 Next rewrite 跟随 `API_INTERNAL_URL`，并使用独立 `.next-e2e-*` 构建目录，避免复用旧 dev server 的认证和 API 端口。
+- 本轮没有新增 200% zoom 或 `375x812`、`768x1024`、`1024x768`、`1440x1000`、`1920x1080` 的独立截图验收证据；受控内置浏览器截图后端仍有超时，因此不虚构视觉截图、console 或 reduced-motion 证据。Playwright 的真实元素交互结果是本轮 onboarding GUI 的验收依据。
+
+明确未完成范围：
+
+- 当前 Web 权限页仍只提供 team-scope invitation 创建 UI；project-scope invitation 的后端 contract/service/API 已可用，但 project invitation UI 不计入本轮完成。
+- 首次创建响应丢失后的明文 token 找回仍没有安全通道；由于 token 不持久化，不能通过新幂等键伪造 resend 或找回旧 token。真实 AI provider、SMTP、真实邮件、真实媒体处理和目标环境供应商兼容性仍需后续凭据与环境验收。
