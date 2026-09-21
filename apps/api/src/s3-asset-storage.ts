@@ -164,7 +164,10 @@ export class S3AssetStorage implements AssetStorage {
     })
   }
 
-  createDownloadUrl(objectKey: string, options?: { attachment?: boolean }) {
+  createDownloadUrl(
+    objectKey: string,
+    options?: { attachment?: boolean; expiresInSeconds?: number },
+  ) {
     return this.withReady(() =>
       getSignedUrl(
         this.client,
@@ -173,7 +176,7 @@ export class S3AssetStorage implements AssetStorage {
           Key: objectKey,
           ResponseContentDisposition: options?.attachment ? "attachment" : undefined,
         }),
-        { expiresIn: downloadLifetimeSeconds },
+        { expiresIn: options?.expiresInSeconds ?? downloadLifetimeSeconds },
       ),
     )
   }
@@ -194,6 +197,28 @@ export class S3AssetStorage implements AssetStorage {
       } finally {
         await file.close()
       }
+    })
+  }
+
+  readTextObject(objectKey: string) {
+    return this.withReady(async () => {
+      const result = await this.client.send(
+        new GetObjectCommand({ Bucket: this.bucket, Key: objectKey }),
+      )
+      if (!result.Body) throw new AppError("ASSET_STORAGE_FAILED", "播放清单不存在", 502)
+      const chunks: Uint8Array[] = []
+      let size = 0
+      try {
+        for await (const chunk of result.Body as AsyncIterable<Uint8Array>) {
+          size += chunk.byteLength
+          if (size > 1024 * 1024) throw new Error("HLS playlist exceeds 1 MiB")
+          chunks.push(chunk)
+        }
+      } finally {
+        const stream = result.Body as { destroy?: () => void }
+        stream.destroy?.()
+      }
+      return Buffer.concat(chunks).toString("utf8")
     })
   }
 

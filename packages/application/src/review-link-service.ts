@@ -21,6 +21,7 @@ import type {
 } from "@shadowproducer/contracts"
 import { accessAllows } from "./access"
 import type { AssetStorage } from "./asset-service"
+import { playbackResource, playbackUrl } from "./hls-playback"
 import { AppError } from "./script-service"
 import type { CreateResult, TeamAccess } from "./workspace-service"
 
@@ -117,6 +118,7 @@ export interface ReviewLinkRepository {
     sessionId: string,
     linkId: string,
     fileId: string,
+    download?: boolean,
   ): Promise<{ objectKey: string } | null>
   auditGuest(input: {
     projectId: string | null
@@ -461,12 +463,16 @@ export class ReviewLinkService {
       session.sessionId,
       linkId,
       fileId,
+      download,
     )
     if (!source) throw new AppError("RESOURCE_NOT_FOUND", "审片媒体尚不可用", 404)
-    const url = await this.storage.createDownloadUrl(
-      source.objectKey,
-      download ? { attachment: true } : undefined,
-    )
+    const url = download
+      ? await this.storage.createDownloadUrl(source.objectKey, { attachment: true })
+      : await playbackUrl(
+          this.storage,
+          source.objectKey,
+          `/review/${encodeURIComponent(linkId)}/files/${encodeURIComponent(fileId)}/playback`,
+        )
     await this.repository.auditGuest({
       projectId: session.projectId,
       linkId,
@@ -476,6 +482,18 @@ export class ReviewLinkService {
       metadata: { fileId },
     })
     return { url, expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString() }
+  }
+
+  async getPlayback(linkId: string, sessionToken: string, fileId: string, file?: string) {
+    const session = await this.requireSession(linkId, sessionToken)
+    const source = await this.repository.getContentSource(
+      session.sessionId,
+      linkId,
+      fileId,
+      false,
+    )
+    if (!source) throw new AppError("RESOURCE_NOT_FOUND", "审片媒体尚不可用", 404)
+    return playbackResource(this.storage, source.objectKey, file)
   }
 
   private async requireSession(linkId: string, sessionToken: string) {

@@ -50,7 +50,7 @@ import {
 } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
 import { useEffect, useRef, useState } from "react"
-
+import { MediaPlayer } from "@/components/media-player"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import {
@@ -1859,6 +1859,7 @@ function ReviewWorkspace({
 
   const selectPrimaryFile = (nextFile: ReviewFile) => {
     pausePlayback()
+    seekTo(0)
     setPrimaryFileId(nextFile.id)
     if (compareFileId === nextFile.id || compareFile?.version === nextFile.version) {
       setCompareFileId(null)
@@ -1872,6 +1873,7 @@ function ReviewWorkspace({
 
   const selectCompareFile = (nextFile: ReviewFile | null) => {
     pausePlayback()
+    seekTo(0)
     setCompareFileId(nextFile?.id ?? null)
     setCompareDuration(nextFile ? reviewDuration(nextFile.duration) : 0)
     setCompareResolution("")
@@ -2101,16 +2103,16 @@ function ReviewWorkspace({
                     )}
                   >
                     {pane.mediaUrl ? (
-                      <video
-                        ref={pane.videoRef}
+                      <MediaPlayer
+                        mediaRef={pane.videoRef}
                         src={pane.mediaUrl}
-                        preload="metadata"
+                        controls={false}
                         muted={muted}
-                        playsInline
-                        aria-label={`${project.name}审片视频 ${pane.slot} ${pane.file.version}`}
+                        startTime={pane.slot === "B" ? time : undefined}
+                        autoPlay={pane.slot === "B" && playing}
+                        label={`${project.name}审片视频 ${pane.slot} ${pane.file.version}`}
                         className="size-full object-contain"
-                        onLoadedMetadata={(event) => {
-                          const video = event.currentTarget
+                        onLoadedMetadata={(video) => {
                           if (Number.isFinite(video.duration) && video.duration > 0) {
                             if (pane.slot === "A") setDuration(video.duration)
                             else setCompareDuration(video.duration)
@@ -2119,9 +2121,9 @@ function ReviewWorkspace({
                           if (pane.slot === "A") setResolution(value)
                           else setCompareResolution(value)
                         }}
-                        onTimeUpdate={(event) => {
+                        onTimeUpdate={(video) => {
                           if (pane.slot === "A") {
-                            const next = event.currentTarget.currentTime
+                            const next = video.currentTime
                             setTime(next)
                             const comparison = compareVideoRef.current
                             if (
@@ -2132,7 +2134,7 @@ function ReviewWorkspace({
                               comparison.currentTime = Math.min(next, compareDuration)
                             }
                           } else if (videoRef.current?.ended) {
-                            setTime(event.currentTarget.currentTime)
+                            setTime(video.currentTime)
                           }
                         }}
                         onPlay={updatePlayingState}

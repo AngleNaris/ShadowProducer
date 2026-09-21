@@ -23,6 +23,7 @@ import { buildApp } from "./app"
 const now = "2026-08-28T10:00:00.000Z"
 
 class MemoryPortfolioRepository implements PortfolioRepository {
+  playbackKey: string | null = null
   readonly portfolios: TeamPortfolio[] = []
   readonly candidates: ApprovedPortfolioCandidate[] = [
     {
@@ -389,7 +390,7 @@ class MemoryPortfolioRepository implements PortfolioRepository {
     return portfolio?.contents.some(
       (content) => content.id === contentId && content.downloadAvailable,
     )
-      ? { objectKey: `portfolios/${contentId}` }
+      ? { objectKey: this.playbackKey ?? `portfolios/${contentId}` }
       : null
   }
 
@@ -421,6 +422,9 @@ class MemoryPortfolioRepository implements PortfolioRepository {
 }
 
 const assetStorage: AssetStorage = {
+  async readTextObject() {
+    return '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=70400,CODECS="mp4a.40.2"\nv0.m3u8\n'
+  },
   async ensureReady() {},
   async createMultipartUpload() {
     throw new Error("not used")
@@ -612,7 +616,7 @@ describe("team portfolio API", () => {
   })
 
   it("publishes, serves, and withdraws a portfolio without member auth", async () => {
-    const { app } = await createTestApp()
+    const { app, repository } = await createTestApp()
     const created = await app.inject({
       method: "POST",
       url: "/v1/teams/north/portfolios",
@@ -653,6 +657,19 @@ describe("team portfolio API", () => {
       method: "GET",
       url: `/portfolio/${slug}/contents/content-1/content-url`,
     })
+    repository.playbackKey =
+      "portfolios/preview-v2.hls/11111111-1111-1111-1111-111111111111/master.m3u8"
+    const playback = `/portfolio/${slug}/contents/content-1/playback`
+    const manifest = await app.inject({ method: "GET", url: playback })
+    expect(manifest.statusCode).toBe(200)
+    expect(manifest.body).toContain("?file=v0.m3u8")
+    expect(
+      (await app.inject({ method: "GET", url: `${playback}?file=v0_000000.m4s` }))
+        .statusCode,
+    ).toBe(302)
+    expect(
+      (await app.inject({ method: "GET", url: `${playback}?file=../secret` })).statusCode,
+    ).toBe(400)
     const unpublished = await app.inject({
       method: "POST",
       url: `/v1/teams/north/portfolios/${created.json().item.id}/unpublish`,
@@ -670,6 +687,10 @@ describe("team portfolio API", () => {
     expect(media.json()).toEqual({ url: "https://media.example/portfolios/content-1" })
     expect(unpublished.json().item.state).toBe("团队可见")
     expect(unavailable.statusCode).toBe(404)
+    expect(
+      (await app.inject({ method: "GET", url: `${playback}?file=v0_000000.m4s` }))
+        .statusCode,
+    ).toBe(404)
   })
 
   it("archives and restores a published portfolio without reopening its public URL", async () => {

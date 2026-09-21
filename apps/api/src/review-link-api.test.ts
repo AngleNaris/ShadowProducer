@@ -42,6 +42,7 @@ class MemoryReviewLinkRepository implements ReviewLinkRepository {
   } | null = null
   comments: ReviewComment[] = []
   file = structuredClone(reviewFile)
+  playbackKey = "reviews/main-v12.mp4"
   audits: Parameters<ReviewLinkRepository["auditGuest"]>[0][] = []
 
   async getProjectAccess(actorId: string, projectId: string) {
@@ -238,7 +239,7 @@ class MemoryReviewLinkRepository implements ReviewLinkRepository {
 
   async getContentSource(_sessionId: string, linkId: string, fileId: string) {
     return this.link?.id === linkId && fileId === this.file.id
-      ? { objectKey: "reviews/main-v12.mp4" }
+      ? { objectKey: this.playbackKey }
       : null
   }
 
@@ -289,6 +290,9 @@ async function createTestApp(
   const service = new ReviewLinkService(
     repository,
     {
+      async readTextObject() {
+        return '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=70400,CODECS="mp4a.40.2"\nv0.m3u8\n'
+      },
       async ensureReady() {},
       async createMultipartUpload() {
         throw new Error("unused")
@@ -497,6 +501,36 @@ describe("external review link API", () => {
       }),
     )
 
+    repository.playbackKey =
+      "reviews/preview-v2.hls/11111111-1111-1111-1111-111111111111/master.m3u8"
+    const playback = `/review/${link.id}/files/${reviewFile.id}/playback`
+    const manifest = await app.inject({
+      method: "GET",
+      url: playback,
+      headers: { cookie: cookie ?? "" },
+    })
+    expect(manifest.statusCode).toBe(200)
+    expect(manifest.body).toContain("?file=v0.m3u8")
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `${playback}?file=v0_000000.m4s`,
+          headers: { cookie: cookie ?? "" },
+        })
+      ).statusCode,
+    ).toBe(302)
+    expect((await app.inject({ method: "GET", url: playback })).statusCode).toBe(401)
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `${playback}?file=../secret`,
+          headers: { cookie: cookie ?? "" },
+        })
+      ).statusCode,
+    ).toBe(400)
+
     const approval = await app.inject({
       method: "POST",
       url: `/review/${link.id}/files/${reviewFile.id}/approve`,
@@ -520,6 +554,15 @@ describe("external review link API", () => {
       headers: { cookie: cookie ?? "" },
     })
     expect(afterRevoke.statusCode).toBe(401)
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `${playback}?file=v0_000000.m4s`,
+          headers: { cookie: cookie ?? "" },
+        })
+      ).statusCode,
+    ).toBe(401)
   })
 
   it("rate limits challenges, locks repeated guesses, and removes failed deliveries", async () => {

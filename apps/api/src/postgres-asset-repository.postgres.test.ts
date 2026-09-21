@@ -2,8 +2,9 @@ import { Pool } from "pg"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
 import { createDatabase, defaultDatabaseUrl } from "./database"
-import { claimEmbeddingJob, processEmbeddingJob } from "./media-worker"
+import { claimEmbeddingJob, processEmbeddingJob, processJob } from "./media-worker"
 import { PostgresAssetRepository } from "./postgres-asset-repository"
+import type { S3AssetStorage } from "./s3-asset-storage"
 
 const databaseUrl = process.env.TEST_DATABASE_URL ?? defaultDatabaseUrl
 const pool = new Pool({ connectionString: databaseUrl, max: 4 })
@@ -121,6 +122,65 @@ afterAll(async () => {
 })
 
 describe("Postgres asset text analysis", () => {
+  it("does not let a stale media attempt overwrite its replacement", async () => {
+    await database
+      .insertInto("asset_media")
+      .values({ asset_id: assetId, status: "ready" })
+      .execute()
+    await database
+      .insertInto("media_processing_jobs")
+      .values({
+        asset_id: assetId,
+        status: "processing",
+        attempts: 2,
+        locked_by: "new-worker",
+        lease_expires_at: new Date(Date.now() + 900000),
+      })
+      .execute()
+    const storage = {
+      async downloadObjectToFile() {
+        throw new Error("download interrupted")
+      },
+    } as unknown as S3AssetStorage
+    try {
+      await processJob(
+        database,
+        storage,
+        {
+          workerId: "old-worker",
+          assetId,
+          teamId,
+          kind: "视频",
+          mimeType: "video/mp4",
+          objectKey,
+          createdByAccountId: actorId,
+          attempts: 1,
+          maxAttempts: 3,
+        },
+        new AbortController().signal,
+      )
+      expect(
+        await database
+          .selectFrom("media_processing_jobs")
+          .select(["status", "attempts", "locked_by"])
+          .where("asset_id", "=", assetId)
+          .executeTakeFirst(),
+      ).toEqual({ status: "processing", attempts: 2, locked_by: "new-worker" })
+      expect(
+        await database
+          .selectFrom("asset_media")
+          .select("status")
+          .where("asset_id", "=", assetId)
+          .executeTakeFirst(),
+      ).toEqual({ status: "ready" })
+    } finally {
+      await database
+        .deleteFrom("media_processing_jobs")
+        .where("asset_id", "=", assetId)
+        .execute()
+      await database.deleteFrom("asset_media").where("asset_id", "=", assetId).execute()
+    }
+  })
   it("keeps legacy local-model tool markers read-only", async () => {
     const insertLegacy = (id: string, status: "queued" | "completed") =>
       pool.query(

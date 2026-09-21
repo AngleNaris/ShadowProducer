@@ -2,9 +2,21 @@ import { describe, expect, it } from "vitest"
 
 import {
   isCurrentAnalysisSource,
+  mediaPreviewEncoding,
   parseProbeOutput,
   parseSceneTimes,
 } from "./media-worker"
+
+describe("display derivatives", () => {
+  it("transcodes images and leaves audiovisual encoding to HLS", () => {
+    expect(mediaPreviewEncoding("视频")).toBeNull()
+    expect(mediaPreviewEncoding("音频")).toBeNull()
+    expect(mediaPreviewEncoding("图片")?.args).toContain("libwebp")
+    expect(mediaPreviewEncoding("图片")?.args.join(" ")).toContain("min(1600,iw)")
+    expect(mediaPreviewEncoding("图片")?.args).not.toContain("copy")
+    expect(mediaPreviewEncoding("文档")).toBeNull()
+  })
+})
 
 describe("media probe parser", () => {
   it("keeps integer time and rational frame-rate metadata", () => {

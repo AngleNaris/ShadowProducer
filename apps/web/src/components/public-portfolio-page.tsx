@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query"
 import { Film, LoaderCircle, RefreshCw } from "lucide-react"
 import { motion } from "motion/react"
 import { useEffect } from "react"
-
+import { MediaPlayer } from "@/components/media-player"
 import { Button } from "@/components/ui/button"
 import { ApiError, publicPortfolioApi } from "@/lib/api-client"
 import { cn } from "@/lib/utils"
@@ -41,13 +41,10 @@ function PublicPortfolioMedia({
             媒体暂不可用
           </div>
         ) : (
-          // biome-ignore lint/a11y/useMediaCaption: Uploaded portfolio media does not yet expose a caption asset.
-          <video
+          <MediaPlayer
             src={media.data.url}
-            controls
-            playsInline
-            preload="metadata"
-            className="size-full object-contain"
+            label={content.title}
+            className="size-full [&>div:first-child]:aspect-auto [&>div:first-child]:flex-1"
           />
         )}
       </div>

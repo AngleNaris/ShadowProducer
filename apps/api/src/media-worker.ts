@@ -1,6 +1,6 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -9,6 +9,7 @@ import type { MediaAnalysisTextSegment } from "@shadowproducer/contracts"
 import { type Kysely, sql } from "kysely"
 
 import { createDatabase, type Database, defaultDatabaseUrl } from "./database"
+import { hlsEncodings, hlsMaster, hlsOutputArgs } from "./hls-encoding"
 import {
   createEmbeddingWithModelApi,
   modelApiConfigFromEnvironment,
@@ -24,6 +25,7 @@ const leaseMinutes = 15
 const maxOutputBytes = 2 * 1024 * 1024
 
 type ClaimedJob = {
+  workerId: string
   assetId: string
   teamId: string
   kind: "视频" | "图片" | "音频" | "文档"
@@ -300,6 +302,7 @@ async function claimJob(database: Kysely<Database>, workerId: string) {
       .where("asset_id", "=", asset.id)
       .execute()
     return {
+      workerId,
       assetId: asset.id,
       teamId: asset.team_id,
       kind: asset.kind,
@@ -522,7 +525,28 @@ export async function claimEmbeddingJob(database: Kysely<Database>, workerId: st
   })
 }
 
-async function processJob(
+export function mediaPreviewEncoding(kind: ClaimedJob["kind"]) {
+  if (kind === "图片")
+    return {
+      fileName: "preview-v2.webp",
+      mimeType: "image/webp",
+      args: [
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=w='min(1600,iw)':h='min(1600,ih)':force_original_aspect_ratio=decrease",
+        "-c:v",
+        "libwebp",
+        "-quality",
+        "78",
+      ],
+    }
+  return null
+}
+
+export async function processJob(
   database: Kysely<Database>,
   storage: S3AssetStorage,
   job: ClaimedJob,
@@ -531,7 +555,10 @@ async function processJob(
   const directory = await mkdtemp(join(tmpdir(), "shadowproducer-media-"))
   const source = join(directory, "source")
   const thumbnail = join(directory, "thumbnail.jpg")
-  const proxy = join(directory, "review.mp4")
+  const encoding = mediaPreviewEncoding(job.kind)
+  const uploadedHlsKeys: string[] = []
+  let committed = false
+  const processingSignal = AbortSignal.any([signal, AbortSignal.timeout(12 * 60_000)])
   try {
     await storage.downloadObjectToFile(job.objectKey, source)
     const probe = await runCommand(
@@ -566,7 +593,7 @@ async function processJob(
           "-frames:v",
           "1",
           "-vf",
-          "scale=640:-2:force_original_aspect_ratio=decrease",
+          "scale=w='min(640,iw)':h='min(640,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
           "-q:v",
           "3",
           "-y",
@@ -578,7 +605,47 @@ async function processJob(
       thumbnailObjectKey = `${derivativeBase}/thumbnail.jpg`
       await storage.uploadDerivedFile(thumbnailObjectKey, thumbnail, "image/jpeg")
     }
-    if (job.kind === "视频") {
+    if (job.kind === "视频" || job.kind === "音频") {
+      const hlsDirectory = join(directory, "hls")
+      await mkdir(hlsDirectory)
+      const encodings = hlsEncodings(job.kind, metadata)
+      for (const profile of encodings) {
+        await runCommand(
+          process.env.FFMPEG_PATH ?? "ffmpeg",
+          [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            source,
+            ...profile.args,
+            ...hlsOutputArgs(hlsDirectory, profile.name),
+            "-y",
+            join(hlsDirectory, `${profile.name}.m3u8`),
+          ],
+          10 * 60_000,
+          processingSignal,
+          hlsDirectory,
+        )
+        await readFile(join(hlsDirectory, `${profile.name}_init.mp4`))
+      }
+      await writeFile(join(hlsDirectory, "master.m3u8"), hlsMaster(encodings), "utf8")
+      const prefix = `${derivativeBase}/preview-v2.hls/${randomUUID()}`
+      for (const name of await readdir(hlsDirectory)) {
+        if (processingSignal.aborted)
+          throw processingSignal.reason ?? new Error("Media job aborted")
+        const key = `${prefix}/${name}`
+        // Track before upload so a lost acknowledgement also gets cleaned on failure.
+        uploadedHlsKeys.push(key)
+        await storage.uploadDerivedFile(
+          key,
+          join(hlsDirectory, name),
+          name.endsWith(".m3u8") ? "application/vnd.apple.mpegurl" : "video/mp4",
+        )
+      }
+      reviewProxyObjectKey = `${prefix}/master.m3u8`
+    } else if (encoding) {
+      const proxy = join(directory, encoding.fileName)
       await runCommand(
         process.env.FFMPEG_PATH ?? "ffmpeg",
         [
@@ -587,37 +654,31 @@ async function processJob(
           "error",
           "-i",
           source,
-          "-map",
-          "0:v:0",
-          "-map",
-          "0:a?",
-          "-c:v",
-          "libx264",
-          "-preset",
-          "veryfast",
-          "-crf",
-          "23",
-          "-pix_fmt",
-          "yuv420p",
-          "-vf",
-          "scale=w='min(1920,iw)':h='min(1080,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-          "-c:a",
-          "aac",
-          "-b:a",
-          "128k",
-          "-movflags",
-          "+faststart",
+          ...encoding.args,
           "-y",
           proxy,
         ],
         10 * 60_000,
         signal,
       )
-      reviewProxyObjectKey = `${derivativeBase}/review.mp4`
-      await storage.uploadDerivedFile(reviewProxyObjectKey, proxy, "video/mp4")
+      // The existing proxy column stores display derivatives for all media kinds.
+      reviewProxyObjectKey = `${derivativeBase}/${encoding.fileName}`
+      await storage.uploadDerivedFile(reviewProxyObjectKey, proxy, encoding.mimeType)
     }
 
+    processingSignal.throwIfAborted()
     await database.transaction().execute(async (transaction) => {
+      const owned = await transaction
+        .selectFrom("media_processing_jobs")
+        .select("asset_id")
+        .where("asset_id", "=", job.assetId)
+        .where("status", "=", "processing")
+        .where("locked_by", "=", job.workerId)
+        .where("attempts", "=", job.attempts)
+        .where("lease_expires_at", ">", sql<Date>`now()`)
+        .forUpdate()
+        .executeTakeFirst()
+      if (!owned) throw new Error("Media processing lease lost")
       await transaction
         .updateTable("asset_media")
         .set({
@@ -668,11 +729,22 @@ async function processJob(
         })
         .execute()
     })
+    committed = true
   } catch (error) {
     const message =
       error instanceof Error ? error.message.slice(0, 2_000) : "媒体处理失败"
     const retry = job.attempts < job.maxAttempts && !signal.aborted
     await database.transaction().execute(async (transaction) => {
+      const owned = await transaction
+        .selectFrom("media_processing_jobs")
+        .select("asset_id")
+        .where("asset_id", "=", job.assetId)
+        .where("status", "=", "processing")
+        .where("locked_by", "=", job.workerId)
+        .where("attempts", "=", job.attempts)
+        .forUpdate()
+        .executeTakeFirst()
+      if (!owned) return
       await transaction
         .updateTable("asset_media")
         .set({
@@ -699,6 +771,13 @@ async function processJob(
     })
     if (!retry) throw error
   } finally {
+    if (!committed) {
+      for (const key of uploadedHlsKeys) {
+        await storage
+          .deleteObject(key)
+          .catch(() => console.error("Failed to clean HLS derivative", key))
+      }
+    }
     await rm(directory, { recursive: true, force: true })
   }
 }
@@ -1227,9 +1306,11 @@ async function runCommand(
   args: string[],
   timeoutMs: number,
   signal: AbortSignal,
+  cwd?: string,
 ) {
+  if (signal.aborted) throw signal.reason ?? new Error("Media command aborted")
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true })
+    const child = spawn(command, args, { windowsHide: true, cwd })
     const stdout: Buffer[] = []
     const stderr: Buffer[] = []
     let outputBytes = 0

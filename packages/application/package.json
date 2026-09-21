@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@shadowproducer/contracts": "workspace:*"
+    "@shadowproducer/contracts": "workspace:*",
+    "hls-parser": "0.16.1"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.10",

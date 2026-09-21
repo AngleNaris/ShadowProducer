@@ -211,7 +211,21 @@ describe("Postgres review identity verification", () => {
     })
     await expect(
       repository.getContentSource(archiveSessionId, linkId, fileId),
+    ).resolves.toBeNull()
+    await expect(
+      repository.getContentSource(archiveSessionId, linkId, fileId, true),
     ).resolves.toEqual({ objectKey: `${runId}/review-v1.mp4` })
+    await database
+      .insertInto("asset_media")
+      .values({
+        asset_id: assetId,
+        status: "ready",
+        review_proxy_object_key: `${runId}/preview.mp4`,
+      })
+      .execute()
+    await expect(
+      repository.getContentSource(archiveSessionId, linkId, fileId),
+    ).resolves.toEqual({ objectKey: `${runId}/preview.mp4` })
 
     await database
       .updateTable("review_files")

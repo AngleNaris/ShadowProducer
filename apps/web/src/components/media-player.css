@@ -1,0 +1,26 @@
+.sp-media-host > .video-js,
+.sp-media-host video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.sp-media-host .vjs-control-bar,
+.sp-media-host .vjs-big-play-button,
+.sp-media-host .vjs-loading-spinner,
+.sp-media-host .vjs-error-display,
+.sp-media-host .vjs-modal-dialog,
+.sp-media-host .vjs-text-track-display,
+.sp-media-host .vjs-poster {
+  display: none;
+}
+
+.sp-media-player:fullscreen {
+  justify-content: center;
+}
+
+.sp-media-player:fullscreen > :first-child {
+  flex: 1;
+}

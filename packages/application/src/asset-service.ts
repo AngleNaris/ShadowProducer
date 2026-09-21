@@ -11,10 +11,11 @@ import type {
   UpdateTeamAssetBody,
 } from "@shadowproducer/contracts"
 import { accessAllows } from "./access"
+import { playbackResource, playbackUrl } from "./hls-playback"
 import { AppError } from "./script-service"
 import type { CreateResult, TeamAccess, UpdateResult } from "./workspace-service"
 
-const DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+const DEFAULT_MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 const MULTIPART_PART_SIZE_BYTES = 5 * 1024 * 1024
 
 type TeamCommand = { actorId: string; teamId: string }
@@ -190,8 +191,9 @@ export interface AssetStorage {
   abortMultipartUpload(input: { objectKey: string; uploadId: string }): Promise<void>
   createDownloadUrl(
     objectKey: string,
-    options?: { attachment?: boolean },
+    options?: { attachment?: boolean; expiresInSeconds?: number },
   ): Promise<string>
+  readTextObject(objectKey: string): Promise<string>
 }
 
 export class AssetService {
@@ -276,10 +278,13 @@ export class AssetService {
 
   async createUploadIntent(command: TeamCommand & CreateAssetUploadIntentBody) {
     await this.assertTeamAccess(command.actorId, command.teamId, "write")
+    if (!Number.isSafeInteger(command.sizeBytes) || command.sizeBytes <= 0) {
+      throw new AppError("ASSET_EMPTY", "文件为空，无法导入", 400)
+    }
     if (command.sizeBytes > this.maxUploadBytes) {
       throw new AppError(
         "ASSET_TOO_LARGE",
-        `当前开发上传单文件上限为 ${Math.round(this.maxUploadBytes / 1024 / 1024)} MB`,
+        `上传单文件上限为 ${Math.round(this.maxUploadBytes / 1024 / 1024)} MB`,
         413,
       )
     }
@@ -493,12 +498,37 @@ export class AssetService {
   }
 
   async getReviewContentUrl(actorId: string, teamId: string, assetId: string) {
+    const key = await this.getReviewSource(actorId, teamId, assetId)
+    return playbackUrl(
+      this.storage,
+      key,
+      `/v1/teams/${encodeURIComponent(teamId)}/assets/${encodeURIComponent(assetId)}/preview`,
+    )
+  }
+
+  async getReviewPlayback(
+    actorId: string,
+    teamId: string,
+    assetId: string,
+    file?: string,
+  ) {
+    return playbackResource(
+      this.storage,
+      await this.getReviewSource(actorId, teamId, assetId),
+      file,
+    )
+  }
+
+  private async getReviewSource(actorId: string, teamId: string, assetId: string) {
     await this.assertTeamAccess(actorId, teamId, "read")
     const stored = await this.repository.getAsset(teamId, assetId)
     if (!stored?.objectKey || stored.item.status !== "ready") {
       throw new AppError("RESOURCE_NOT_FOUND", "审阅媒体尚不可用", 404)
     }
-    return this.storage.createDownloadUrl(stored.reviewProxyObjectKey ?? stored.objectKey)
+    if (stored.item.mediaStatus !== "ready" || !stored.reviewProxyObjectKey) {
+      throw new AppError("MEDIA_NOT_READY", "预览文件尚未生成，请等待媒体处理完成", 409)
+    }
+    return stored.reviewProxyObjectKey
   }
 
   async getThumbnailUrl(actorId: string, teamId: string, assetId: string) {

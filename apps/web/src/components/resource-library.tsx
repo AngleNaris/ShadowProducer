@@ -54,6 +54,7 @@ import {
   useRef,
   useState,
 } from "react"
+import { MediaPlayer } from "@/components/media-player"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -283,6 +284,7 @@ type AssetItem = {
   duplicate?: boolean
   preview?: boolean
   previewUrl?: string
+  playbackReady: boolean
   status: TeamAsset["status"]
   analysisReady: boolean
   searchMatches: TeamAsset["searchMatches"]
@@ -320,8 +322,8 @@ function inferKind(fileName: string): AssetKind {
   return "文档"
 }
 
-async function uploadCommandKeys(teamId: string, file: File) {
-  const fingerprint = `${teamId}:${file.name}:${file.type}:${file.size}:${file.lastModified}`
+async function uploadCommandKeys(teamId: string, file: File, destination: string) {
+  const fingerprint = `${teamId}:${destination}:${file.name}:${file.type}:${file.size}:${file.lastModified}`
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(fingerprint),
@@ -432,16 +434,10 @@ const mediaAnalysisStatusText: Record<MediaAnalysisJob["status"], string> = {
 }
 
 function toAssetItem(
-  teamId: string,
   asset: TeamAsset,
   semanticMatch?: AssetSemanticSearchMatch,
 ): AssetItem {
-  const previewUrl = asset.archived
-    ? undefined
-    : (asset.thumbnailUrl ??
-      (asset.kind === "图片" && asset.status === "ready"
-        ? assetApi.contentUrl(teamId, asset.id)
-        : undefined))
+  const previewUrl = asset.archived ? undefined : (asset.thumbnailUrl ?? undefined)
   return {
     id: asset.id,
     projectId: asset.projectId,
@@ -478,6 +474,8 @@ function toAssetItem(
     favorite: asset.favorite,
     preview: Boolean(previewUrl),
     previewUrl,
+    playbackReady:
+      asset.mediaStatus === "ready" && asset.reviewProxyReady && !asset.archived,
     status: asset.status,
     analysisReady:
       ["视频", "音频", "图片"].includes(asset.kind) &&
@@ -569,6 +567,43 @@ function RatingControl({
         </button>
       ))}
     </fieldset>
+  )
+}
+
+function ResourceMediaPreview({
+  teamId,
+  asset,
+  startTime,
+}: {
+  teamId: string
+  asset: AssetItem
+  startTime: number
+}) {
+  const media = useQuery({
+    queryKey: ["asset-content-url", teamId, asset.id],
+    queryFn: () => assetApi.getReviewContentUrl(teamId, asset.id),
+    staleTime: 4 * 60 * 1000,
+  })
+  if (media.isPending)
+    return (
+      <p role="status" className="p-4 text-sm">
+        正在载入媒体
+      </p>
+    )
+  if (media.isError)
+    return (
+      <p role="alert" className="p-4 text-sm text-destructive">
+        {media.error.message}
+      </p>
+    )
+  return (
+    <MediaPlayer
+      src={media.data.url}
+      label={asset.name}
+      audio={asset.kind === "音频"}
+      startTime={startTime}
+      autoPlay={startTime > 0}
+    />
   )
 }
 
@@ -720,15 +755,10 @@ export function ResourceLibrary({ team }: { team: WorkspaceTeam }) {
     () =>
       semanticSearchActive
         ? (semanticAssetsQuery.data?.items ?? []).map((match) =>
-            toAssetItem(teamId, match.item, match),
+            toAssetItem(match.item, match),
           )
-        : (assetsQuery.data?.items ?? []).map((asset) => toAssetItem(teamId, asset)),
-    [
-      assetsQuery.data?.items,
-      semanticAssetsQuery.data?.items,
-      semanticSearchActive,
-      teamId,
-    ],
+        : (assetsQuery.data?.items ?? []).map((asset) => toAssetItem(asset)),
+    [assetsQuery.data?.items, semanticAssetsQuery.data?.items, semanticSearchActive],
   )
   const assetFolders = useMemo(
     () => (semanticSearchActive ? [] : (assetsQuery.data?.folders ?? [])),
@@ -1327,16 +1357,28 @@ export function ResourceLibrary({ team }: { team: WorkspaceTeam }) {
     const inboxId = assetsQuery.data?.folders.find(
       (folder) => folder.name === "收件箱",
     )?.id
+    const targetFolder = activeFilter.startsWith("folder:")
+      ? assetsQuery.data?.folders.find((folder) => folder.name === activeFilter.slice(7))
+      : undefined
+    const folderId = targetFolder?.id ?? inboxId ?? null
+    const projectId = semanticProjectId ?? null
     for (const file of files) {
       try {
-        const keys = await uploadCommandKeys(teamId, file)
+        if (file.size === 0)
+          throw new ApiError(
+            "ASSET_EMPTY",
+            `“${file.name}”为空文件，无法导入`,
+            400,
+            false,
+          )
+        const keys = await uploadCommandKeys(teamId, file, `${folderId}:${projectId}`)
         const request = {
           name: file.name,
           kind: inferKind(file.name),
           mimeType: file.type || "application/octet-stream",
           sizeBytes: file.size,
-          projectId: projects[0]?.id ?? null,
-          folderId: inboxId ?? null,
+          projectId,
+          folderId,
           idempotencyKey: keys.intentKey,
         }
         let intent = await assetApi.createUploadIntent(teamId, request)
@@ -1372,7 +1414,8 @@ export function ResourceLibrary({ team }: { team: WorkspaceTeam }) {
       }
     }
     await queryClient.invalidateQueries({ queryKey: ["team-assets", teamId] })
-    if (!failed) setStatusMessage(`已导入 ${completed} 项到“收件箱”`)
+    if (!failed)
+      setStatusMessage(`已导入 ${completed} 项到“${targetFolder?.name ?? "收件箱"}”`)
     else if (completed) setStatusMessage(`已导入 ${completed} 项，${failed} 项失败`)
   }
 
@@ -3925,18 +3968,30 @@ export function ResourceLibrary({ team }: { team: WorkspaceTeam }) {
           </DialogHeader>
           {previewAsset ? (
             <div className="grid min-h-[320px] place-items-center border border-border bg-muted/30">
-              {previewAsset.kind === "视频" ? (
-                // biome-ignore lint/a11y/useMediaCaption: Uploaded media has no caption derivative until a real ASR runtime is connected.
-                <video
+              {!previewAsset.playbackReady && previewAsset.kind !== "文档" ? (
+                <p role="status" className="p-4 text-sm text-muted-foreground">
+                  {previewAsset.processing === "已完成"
+                    ? "预览文件尚未生成"
+                    : (previewAsset.processing ?? "等待媒体处理")}
+                </p>
+              ) : previewAsset.kind === "视频" || previewAsset.kind === "音频" ? (
+                <ResourceMediaPreview
                   key={`${previewAsset.id}:${previewTimeUs}`}
-                  controls
-                  autoPlay={previewTimeUs > 0}
-                  preload="metadata"
-                  className="aspect-video w-full bg-black object-contain"
-                  src={`${assetApi.contentUrl(teamId, previewAsset.id)}#t=${(
-                    previewTimeUs / 1_000_000
-                  ).toFixed(6)}`}
-                ></video>
+                  teamId={teamId}
+                  asset={previewAsset}
+                  startTime={previewTimeUs / 1_000_000}
+                />
+              ) : previewAsset.kind === "图片" ? (
+                <div className="relative h-[min(60vh,640px)] w-full">
+                  <Image
+                    src={assetApi.previewUrl(teamId, previewAsset.id)}
+                    alt={previewAsset.name}
+                    fill
+                    unoptimized
+                    sizes="(max-width: 768px) 100vw, 768px"
+                    className="object-contain"
+                  />
+                </div>
               ) : (
                 <div className="aspect-video w-full">
                   <AssetPreview asset={previewAsset} />

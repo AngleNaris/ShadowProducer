@@ -8,6 +8,7 @@ import {
   type AssetService,
   type ContactService,
   type DataExportService,
+  type PlaybackResource,
   type PortfolioService,
   type ProductionService,
   type ReviewLinkService,
@@ -155,6 +156,8 @@ import {
   MergeBreakdownBodySchema,
   type MoveReviewFileBody,
   MoveReviewFileBodySchema,
+  type NotificationListQuery,
+  NotificationListQuerySchema,
   type NotificationPreferences,
   NotificationPreferencesSchema,
   OnboardingProjectSchema,
@@ -246,6 +249,8 @@ import {
   RevokeInvitationBodySchema,
   type RevokeReviewLinkBody,
   RevokeReviewLinkBodySchema,
+  type RotateInvitationTokenBody,
+  RotateInvitationTokenBodySchema,
   type ScriptCommentParams,
   ScriptCommentParamsSchema,
   ScriptDocumentListSchema,
@@ -358,7 +363,7 @@ import {
   WorkspaceTaskMutationSchema,
   WorkspaceTaskSchema,
 } from "@shadowproducer/contracts"
-import Fastify, { type FastifyError } from "fastify"
+import Fastify, { type FastifyError, type FastifyReply } from "fastify"
 
 import type { AuthGateway } from "./auth"
 import type {
@@ -366,6 +371,20 @@ import type {
   ScriptRealtimeEvent,
   ScriptRealtimeStore,
 } from "./postgres-script-realtime-store"
+
+const playbackQuerySchema = {
+  type: "object",
+  properties: { file: { type: "string", maxLength: 80 } },
+  additionalProperties: false,
+} as const
+
+function sendPlayback(reply: FastifyReply, resource: PlaybackResource) {
+  reply.header("Cache-Control", "private, no-store")
+  reply.header("X-Content-Type-Options", "nosniff")
+  return "playlist" in resource
+    ? reply.type("application/vnd.apple.mpegurl").send(resource.playlist)
+    : reply.redirect(resource.url)
+}
 
 type AppOptions = {
   scriptService: ScriptService
@@ -1062,11 +1081,12 @@ export async function buildApp({
       },
     )
 
-    app.get<{ Params: TeamParams }>(
+    app.get<{ Params: TeamParams; Querystring: NotificationListQuery }>(
       "/v1/teams/:teamId/notifications",
       {
         schema: {
           params: TeamParamsSchema,
+          querystring: NotificationListQuerySchema,
           response: {
             200: WorkspaceNotificationListSchema,
             401: ErrorResponseSchema,
@@ -1076,7 +1096,11 @@ export async function buildApp({
       },
       async (request) => {
         const actorId = actorIdFromHeader(request.headers["x-shadow-account-id"])
-        return workspaceService.listNotifications(actorId, request.params.teamId)
+        return workspaceService.listNotifications(
+          actorId,
+          request.params.teamId,
+          request.query,
+        )
       },
     )
 
@@ -1693,6 +1717,38 @@ export async function buildApp({
       },
     )
 
+    app.post<{ Params: InvitationRevokeParams; Body: RotateInvitationTokenBody }>(
+      "/v1/teams/:teamId/invitations/:invitationId/rotate-token",
+      {
+        schema: {
+          params: invitationRevokeParamsJsonSchema,
+          body: RotateInvitationTokenBodySchema,
+          response: {
+            200: InvitationMutationSchema,
+            201: InvitationMutationSchema,
+            400: ErrorResponseSchema,
+            401: ErrorResponseSchema,
+            403: ErrorResponseSchema,
+            404: ErrorResponseSchema,
+            409: ErrorResponseSchema,
+            410: ErrorResponseSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        const actorId = actorIdFromHeader(request.headers["x-shadow-account-id"])
+        const result = await workspaceService.rotateInvitationToken({
+          actorId,
+          teamId: request.params.teamId,
+          itemId: request.params.invitationId,
+          ...request.body,
+        })
+        return reply
+          .code("replayed" in result && result.replayed ? 200 : 201)
+          .send(result)
+      },
+    )
+
     app.post<{ Params: InvitationRevokeParams; Body: RevokeInvitationBody }>(
       "/v1/teams/:teamId/invitations/:invitationId/revoke",
       {
@@ -1706,6 +1762,7 @@ export async function buildApp({
             403: ErrorResponseSchema,
             404: ErrorResponseSchema,
             409: ErrorResponseSchema,
+            410: ErrorResponseSchema,
           },
         },
       },
@@ -2574,6 +2631,23 @@ export async function buildApp({
       },
     )
 
+    app.get<{ Params: TeamAssetParams; Querystring: { file?: string } }>(
+      "/v1/teams/:teamId/assets/:assetId/preview",
+      { schema: { params: TeamAssetParamsSchema, querystring: playbackQuerySchema } },
+      async (request, reply) => {
+        const actorId = actorIdFromHeader(request.headers["x-shadow-account-id"])
+        return sendPlayback(
+          reply,
+          await assetService.getReviewPlayback(
+            actorId,
+            request.params.teamId,
+            request.params.assetId,
+            request.query.file,
+          ),
+        )
+      },
+    )
+
     app.get<{ Params: TeamAssetParams }>(
       "/v1/teams/:teamId/assets/:assetId/thumbnail",
       { schema: { params: TeamAssetParamsSchema } },
@@ -3013,6 +3087,24 @@ export async function buildApp({
         portfolioService.getPublicContentUrl(
           request.params.slug,
           request.params.contentId,
+        ),
+    )
+    app.get<{ Params: PublicPortfolioContentParams; Querystring: { file?: string } }>(
+      "/portfolio/:slug/contents/:contentId/playback",
+      {
+        schema: {
+          params: PublicPortfolioContentParamsSchema,
+          querystring: playbackQuerySchema,
+        },
+      },
+      async (request, reply) =>
+        sendPlayback(
+          reply,
+          await portfolioService.getPublicPlayback(
+            request.params.slug,
+            request.params.contentId,
+            request.query.file,
+          ),
         ),
     )
   }
@@ -4128,6 +4220,25 @@ export async function buildApp({
           reviewSessionToken(request.headers.cookie),
           request.params.fileId,
           request.query.download === "1",
+        ),
+    )
+    app.get<{ Params: PublicReviewFileParams; Querystring: { file?: string } }>(
+      "/review/:linkId/files/:fileId/playback",
+      {
+        schema: {
+          params: PublicReviewFileParamsSchema,
+          querystring: playbackQuerySchema,
+        },
+      },
+      async (request, reply) =>
+        sendPlayback(
+          reply,
+          await reviewLinkService.getPlayback(
+            request.params.linkId,
+            reviewSessionToken(request.headers.cookie),
+            request.params.fileId,
+            request.query.file,
+          ),
         ),
     )
   }

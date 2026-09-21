@@ -509,7 +509,12 @@ export class PostgresReviewLinkRepository implements ReviewLinkRepository {
     })
   }
 
-  async getContentSource(sessionId: string, linkId: string, fileId: string) {
+  async getContentSource(
+    sessionId: string,
+    linkId: string,
+    fileId: string,
+    download = false,
+  ) {
     const row = await this.database
       .selectFrom("review_sessions as session")
       .innerJoin("review_links as link", "link.id", "session.link_id")
@@ -517,7 +522,11 @@ export class PostgresReviewLinkRepository implements ReviewLinkRepository {
       .innerJoin("review_files as file", "file.id", "allowed.file_id")
       .innerJoin("team_assets as asset", "asset.id", "file.asset_id")
       .leftJoin("asset_media as media", "media.asset_id", "asset.id")
-      .select(["asset.object_key", "media.review_proxy_object_key"])
+      .select([
+        "asset.object_key",
+        "media.review_proxy_object_key",
+        "media.status as media_status",
+      ])
       .where("session.id", "=", sessionId)
       .where("link.id", "=", linkId)
       .where("file.id", "=", fileId)
@@ -529,7 +538,11 @@ export class PostgresReviewLinkRepository implements ReviewLinkRepository {
       .where("asset.status", "=", "ready")
       .where("asset.archived_at", "is", null)
       .executeTakeFirst()
-    const objectKey = row?.review_proxy_object_key ?? row?.object_key
+    const objectKey = download
+      ? row?.object_key
+      : row?.media_status === "ready"
+        ? row.review_proxy_object_key
+        : null
     return objectKey ? { objectKey } : null
   }
 

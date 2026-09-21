@@ -647,13 +647,18 @@ export class PostgresPortfolioRepository implements PortfolioRepository {
 
   async getPublicContentSource(slug: string, contentId: string) {
     const row = await this.publicContentsQuery(this.database)
+      .innerJoin("asset_media as media", "media.asset_id", "asset.id")
+      .select("media.review_proxy_object_key")
+      .where("media.status", "=", "ready")
       .innerJoin("team_portfolios as portfolio", "portfolio.id", "item.portfolio_id")
       .where("portfolio.public_slug", "=", slug)
       .where("portfolio.state", "=", "已公开")
       .where("portfolio.archived_at", "is", null)
       .where("item.id", "=", contentId)
       .executeTakeFirst()
-    return row?.object_key ? { objectKey: row.object_key } : null
+    return row?.review_proxy_object_key
+      ? { objectKey: row.review_proxy_object_key }
+      : null
   }
 
   private async changePublication(

@@ -16,6 +16,7 @@ import type {
 } from "@shadowproducer/contracts"
 import { accessAllows } from "./access"
 import type { AssetStorage } from "./asset-service"
+import { playbackResource, playbackUrl } from "./hls-playback"
 import { AppError } from "./script-service"
 import type { CreateResult, TeamAccess } from "./workspace-service"
 
@@ -309,9 +310,19 @@ export class PortfolioService {
     const source = await this.repository.getPublicContentSource(slug, contentId)
     if (!source) throw new AppError("RESOURCE_NOT_FOUND", "公开作品内容不存在", 404)
     return {
-      url: await this.storage.createDownloadUrl(source.objectKey),
+      url: await playbackUrl(
+        this.storage,
+        source.objectKey,
+        `/portfolio/${encodeURIComponent(slug)}/contents/${encodeURIComponent(contentId)}/playback`,
+      ),
       expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
     }
+  }
+
+  async getPublicPlayback(slug: string, contentId: string, file?: string) {
+    const source = await this.repository.getPublicContentSource(slug, contentId)
+    if (!source) throw new AppError("RESOURCE_NOT_FOUND", "公开作品内容不存在", 404)
+    return playbackResource(this.storage, source.objectKey, file)
   }
 
   private requirePublicationResult(result: PortfolioWriteResult) {

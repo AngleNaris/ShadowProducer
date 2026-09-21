@@ -425,8 +425,17 @@ describe("Postgres portfolio publishing enhancements", () => {
     await expect(repository.getPublicPortfolio(slug)).resolves.toMatchObject({
       contents: [expect.objectContaining({ id: contentId, version: "v1" })],
     })
+    await expect(repository.getPublicContentSource(slug, contentId)).resolves.toBeNull()
+    await database
+      .insertInto("asset_media")
+      .values({
+        asset_id: assetId,
+        status: "ready",
+        review_proxy_object_key: `${runId}/preview.mp4`,
+      })
+      .execute()
     await expect(repository.getPublicContentSource(slug, contentId)).resolves.toEqual({
-      objectKey: `${runId}/approved-review.mp4`,
+      objectKey: `${runId}/preview.mp4`,
     })
   })
 

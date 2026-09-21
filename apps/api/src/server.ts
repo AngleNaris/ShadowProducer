@@ -79,7 +79,7 @@ const analysisService = new AnalysisService(
 const assetService = new AssetService(
   assetRepository,
   assetStorage,
-  Number(process.env.ASSET_MAX_UPLOAD_BYTES ?? 100 * 1024 * 1024),
+  Number(process.env.ASSET_MAX_UPLOAD_BYTES ?? 2 * 1024 * 1024 * 1024),
   (input) =>
     createEmbeddingWithModelApi(modelApiConfigFromEnvironment("embedding"), input),
 )

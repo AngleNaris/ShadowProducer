@@ -410,6 +410,9 @@ class MemoryAssetRepository implements AssetRepository {
 }
 
 class MemoryAssetStorage implements AssetStorage {
+  async readTextObject(): Promise<string> {
+    return '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=70400,CODECS="mp4a.40.2"\nv0.m3u8\n'
+  }
   verified = false
   failReadiness = false
   createdUploads = 0
@@ -834,7 +837,7 @@ describe("team asset API", () => {
   })
 
   it("returns an authenticated short-lived URL for ready asset content", async () => {
-    const { app } = await createTestApp()
+    const { app, repository } = await createTestApp()
     const intent = await app.inject({
       method: "POST",
       url: "/v1/teams/north/assets/upload-intents",
@@ -867,6 +870,83 @@ describe("team asset API", () => {
 
     expect(response.statusCode).toBe(200)
     expect(response.json()).toEqual({ url: "http://storage.test/download" })
+    const previewRequest = {
+      method: "GET" as const,
+      url: `/v1/teams/north/assets/${item.id}/preview`,
+      headers: writerHeaders,
+    }
+    expect((await app.inject(previewRequest)).statusCode).toBe(409)
+    const stored = repository.assets.find((asset) => asset.item.id === item.id)
+    if (!stored) throw new Error("Missing completed asset")
+    stored.reviewProxyObjectKey = "derived/preview.mp4"
+    stored.item.mediaStatus = "failed"
+    expect((await app.inject(previewRequest)).statusCode).toBe(409)
+    stored.item.mediaStatus = "ready"
+    expect((await app.inject(previewRequest)).statusCode).toBe(302)
+    stored.reviewProxyObjectKey =
+      "derived/preview-v2.hls/12345678-1234-1234-1234-123456789012/master.m3u8"
+    const playlist = await app.inject(previewRequest)
+    expect(playlist.statusCode).toBe(200)
+    expect(playlist.headers["cache-control"]).toBe("private, no-store")
+    expect(playlist.body).toContain("?file=v0.m3u8")
+    expect(
+      (
+        await app.inject({
+          ...previewRequest,
+          url: `${previewRequest.url}?file=v0_000000.m4s`,
+        })
+      ).statusCode,
+    ).toBe(302)
+    expect(
+      (
+        await app.inject({
+          ...previewRequest,
+          url: `${previewRequest.url}?file=..%2Foriginal.mp4`,
+        })
+      ).statusCode,
+    ).toBe(400)
+    expect(
+      (
+        await app.inject({
+          ...previewRequest,
+          url: `${previewRequest.url}?file=v0_000000.m4s`,
+          headers: { "x-shadow-account-id": "other" },
+        })
+      ).statusCode,
+    ).toBe(403)
+    expect(
+      (
+        await app.inject({
+          ...previewRequest,
+          headers: { "x-shadow-account-id": "other" },
+        })
+      ).statusCode,
+    ).toBe(403)
+  })
+
+  it("rejects empty uploads with a specific message and accepts multipart real-film sizes", async () => {
+    const { app } = await createTestApp(2 * 1024 * 1024 * 1024)
+    const request = {
+      method: "POST" as const,
+      url: "/v1/teams/north/assets/upload-intents",
+      headers: writerHeaders,
+      payload: {
+        name: "film.mp4",
+        kind: "视频",
+        mimeType: "video/mp4",
+        sizeBytes: 0,
+        idempotencyKey: "real-size-upload-001",
+      },
+    }
+    const empty = await app.inject(request)
+    expect(empty.statusCode).toBe(400)
+    expect(empty.json().code).toBe("ASSET_EMPTY")
+    const large = await app.inject({
+      ...request,
+      payload: { ...request.payload, sizeBytes: 372817184 },
+    })
+    expect(large.statusCode).toBe(201)
+    expect(large.json().upload.parts.length).toBeGreaterThan(1)
   })
 
   it("creates, reads, confirms, and protects a media analysis task", async () => {

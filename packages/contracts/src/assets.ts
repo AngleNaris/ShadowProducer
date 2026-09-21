@@ -303,7 +303,7 @@ export const CreateAssetUploadIntentBodySchema = Type.Object({
   name: Type.String({ minLength: 1, maxLength: 300 }),
   kind: AssetKindSchema,
   mimeType: Type.String({ minLength: 1, maxLength: 200 }),
-  sizeBytes: Type.Integer({ minimum: 1 }),
+  sizeBytes: Type.Integer({ minimum: 0 }),
   projectId: Type.Optional(
     Type.Union([Type.String({ minLength: 1, maxLength: 100 }), Type.Null()]),
   ),

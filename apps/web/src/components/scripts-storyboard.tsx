@@ -120,7 +120,6 @@ function formatTime(seconds: number) {
 function ShotThumbnail({
   shot,
   asset,
-  teamId,
   sizes,
   priority = false,
 }: {
@@ -130,8 +129,7 @@ function ShotThumbnail({
   sizes: string
   priority?: boolean
 }) {
-  const source =
-    asset?.thumbnailUrl ?? (asset ? assetApi.contentUrl(teamId, asset.id) : null)
+  const source = asset?.thumbnailUrl ?? null
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-media-panel">
@@ -2403,14 +2401,16 @@ function StoryboardInspector({
                       className="min-h-16"
                     >
                       <span className="relative h-11 w-20 shrink-0 overflow-hidden border border-border bg-muted">
-                        <Image
-                          src={item.thumbnailUrl ?? assetApi.contentUrl(teamId, item.id)}
-                          alt=""
-                          fill
-                          sizes="80px"
-                          unoptimized
-                          className="object-cover"
-                        />
+                        {item.thumbnailUrl ? (
+                          <Image
+                            src={item.thumbnailUrl}
+                            alt=""
+                            fill
+                            sizes="80px"
+                            unoptimized
+                            className="object-cover"
+                          />
+                        ) : null}
                       </span>
                       <span className="min-w-0 flex-1">
                         <strong className="block truncate text-sm">{item.name}</strong>

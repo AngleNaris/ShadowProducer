@@ -24,6 +24,7 @@ import {
 } from "lucide-react"
 import { motion } from "motion/react"
 import { useEffect, useRef, useState } from "react"
+import { MediaPlayer } from "@/components/media-player"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -312,9 +313,11 @@ function PublicReviewWorkspaceView({ workspace }: { workspace: PublicReviewWorks
   const resetPlayback = () => {
     primaryVideoRef.current?.pause()
     compareVideoRef.current?.pause()
+    if (primaryVideoRef.current) primaryVideoRef.current.currentTime = 0
+    if (compareVideoRef.current) compareVideoRef.current.currentTime = 0
     setPlaying(false)
     setTime(0)
-    setDuration(0)
+    setDuration(primaryVideoRef.current?.duration || 0)
   }
 
   const createCommentMutation = useMutation({
@@ -379,7 +382,7 @@ function PublicReviewWorkspaceView({ workspace }: { workspace: PublicReviewWorks
       return
     }
     void Promise.allSettled(videos.map((video) => video.play())).then(() =>
-      setPlaying(true),
+      setPlaying(!primary.paused && !primary.ended),
     )
   }
 
@@ -471,17 +474,15 @@ function PublicReviewWorkspaceView({ workspace }: { workspace: PublicReviewWorks
                   {mediaQuery.error.message}
                 </p>
               ) : (
-                // biome-ignore lint/a11y/useMediaCaption: Uploaded review media does not yet expose a caption asset.
-                <video
-                  ref={primaryVideoRef}
+                <MediaPlayer
+                  mediaRef={primaryVideoRef}
                   src={mediaQuery.data.url}
-                  playsInline
-                  className="max-h-full w-full object-contain"
-                  onLoadedMetadata={(event) =>
-                    setDuration(event.currentTarget.duration || 0)
-                  }
-                  onTimeUpdate={(event) => {
-                    const next = event.currentTarget.currentTime
+                  label={`审片 A ${selected.version}`}
+                  controls={false}
+                  className="aspect-video w-full"
+                  onLoadedMetadata={(video) => setDuration(video.duration || 0)}
+                  onTimeUpdate={(video) => {
+                    const next = video.currentTime
                     setTime(next)
                     const compareVideo = compareVideoRef.current
                     if (
@@ -508,12 +509,15 @@ function PublicReviewWorkspaceView({ workspace }: { workspace: PublicReviewWorks
                     {compareMediaQuery.error.message}
                   </p>
                 ) : (
-                  <video
-                    ref={compareVideoRef}
+                  <MediaPlayer
+                    mediaRef={compareVideoRef}
                     src={compareMediaQuery.data.url}
-                    playsInline
+                    label={`审片 B ${compared.version}`}
+                    controls={false}
                     muted
-                    className="max-h-full w-full object-contain"
+                    startTime={time}
+                    autoPlay={playing}
+                    className="aspect-video w-full"
                   />
                 )}
                 <span className="absolute left-2 top-2 bg-media-panel/90 px-2 py-1 text-xs">
