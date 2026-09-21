@@ -16,5 +16,11 @@ apps/*/out/
 !/output/playwright/
 /output/playwright/*
 !/output/playwright/dashboard-continuous-panel-1440x900.png
+!/output/playwright/previewfix-prores.png
+!/output/playwright/previewfix-image-mobile.png
+!/output/playwright/hls-audio-desktop.png
+!/output/playwright/hls-audio-mobile.png
 /ai_hits.txt
 /projects.md
+/.playwright-cli/
+apps/*/.next-*/
