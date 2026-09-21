@@ -19,8 +19,9 @@ import type {
 import { describe, expect, it } from "vitest"
 
 const now = "2026-09-04T08:00:00.000Z"
-const futureExpiry = "2026-09-11T08:00:00.000Z"
-const pastExpiry = "2026-08-28T08:00:00.000Z"
+// 邀请有效期以真实系统时钟校验，测试到期时间必须相对当前时间推导，避免硬编码日期随时间失效。
+const futureExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+const pastExpiry = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
 const validToken = "valid-invitation-token-abc123"
 
 function sha256(value: string) {

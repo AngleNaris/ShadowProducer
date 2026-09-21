@@ -21,6 +21,8 @@ const tokenHash = createHash("sha256").update(token).digest("hex")
 const projectToken = "project-invitation-token-abc123"
 const projectTokenHash = createHash("sha256").update(projectToken).digest("hex")
 const now = "2026-09-04T08:00:00.000Z"
+// 邀请有效期以真实系统时钟校验，测试到期时间必须相对当前时间推导，避免硬编码日期随时间失效。
+const futureExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
 
 function summary(status: InvitationSummary["status"] = "pending"): InvitationSummary {
   return {
@@ -38,7 +40,7 @@ function summary(status: InvitationSummary["status"] = "pending"): InvitationSum
     invitedByAccountId: "account-fanxing",
     invitedByName: "繁星",
     acceptedAccountId: status === "accepted" ? "account-invitee" : null,
-    expiresAt: "2026-09-11T08:00:00.000Z",
+    expiresAt: futureExpiry,
     acceptedAt: status === "accepted" ? now : null,
     revokedAt: status === "revoked" ? now : null,
     revision: 1,
