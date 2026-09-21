@@ -62,7 +62,7 @@ export default defineConfig({
       },
     },
     {
-      command: "pnpm --filter @shadowproducer/web dev",
+      command: `pnpm --filter @shadowproducer/web exec next dev --port ${webPort}`,
       url: webBaseURL,
       reuseExistingServer: !process.env.CI,
       timeout: 240_000,
@@ -70,6 +70,7 @@ export default defineConfig({
       stderr: "pipe",
       env: {
         PORT: String(webPort),
+        NEXT_DIST_DIR: `.next-e2e-${webPort}`,
         API_INTERNAL_URL: apiBaseURL,
         NEXT_PUBLIC_ENABLE_REGISTRATION: "true",
         PUBLIC_WEB_HOSTS: "localhost,127.0.0.1",

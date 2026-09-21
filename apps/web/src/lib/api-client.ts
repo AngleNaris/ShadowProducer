@@ -121,6 +121,7 @@ import type {
   WorkspaceContext,
   WorkspaceNote,
   WorkspaceNotification,
+  WorkspaceNotificationList,
   WorkspaceRecycleItem,
   WorkspaceTask,
 } from "@shadowproducer/contracts"
@@ -193,6 +194,11 @@ async function apiDownload(path: string) {
       ? decodeURIComponent(encoded)
       : (fallback ?? "shadowproducer-data.json"),
   }
+}
+
+async function playbackRequest<T extends { url: string }>(path: string): Promise<T> {
+  const result = await apiRequest<T>(path)
+  return { ...result, url: result.url.startsWith("/") ? `/api${result.url}` : result.url }
 }
 
 export const scriptApi = {
@@ -591,7 +597,7 @@ export const reviewLinkApi = {
     )
   },
   getContentUrl(linkId: string, fileId: string, download = false) {
-    return apiRequest<{ url: string; expiresAt: string }>(
+    return playbackRequest<{ url: string; expiresAt: string }>(
       `/review/${encodeURIComponent(linkId)}/files/${encodeURIComponent(fileId)}/content-url${download ? "?download=1" : ""}`,
     )
   },
@@ -669,9 +675,13 @@ export const workspaceApi = {
       { method: "PATCH", body: JSON.stringify(body) },
     )
   },
-  listNotifications(teamId: string) {
-    return apiRequest<{ items: WorkspaceNotification[]; unreadCount: number }>(
-      teamPath(teamId, "notifications"),
+  listNotifications(teamId: string, query: { page?: number; pageSize?: number } = {}) {
+    const params = new URLSearchParams()
+    if (query.page) params.set("page", String(query.page))
+    if (query.pageSize) params.set("pageSize", String(query.pageSize))
+    const suffix = params.size ? `?${params}` : ""
+    return apiRequest<WorkspaceNotificationList>(
+      `${teamPath(teamId, "notifications")}${suffix}`,
     )
   },
   updateNotification(teamId: string, itemId: string, body: UpdateNotificationStateBody) {
@@ -769,7 +779,9 @@ export const workspaceApi = {
     )
   },
   listRecycleBin(teamId: string) {
-    return apiRequest<{ items: WorkspaceRecycleItem[] }>(teamPath(teamId, "recycle-bin"))
+    return apiRequest<{ items: WorkspaceRecycleItem[]; canManageShared: boolean }>(
+      teamPath(teamId, "recycle-bin"),
+    )
   },
   restoreRecycleItem(teamId: string, item: WorkspaceRecycleItem) {
     return apiRequest<{ id: string }>(
@@ -824,6 +836,19 @@ export const onboardingApi = {
         method: "POST",
         body: JSON.stringify({ expectedRevision }),
       },
+    )
+  },
+  rotateInvitationToken(
+    teamId: string,
+    invitationId: string,
+    body: { expectedRevision: number; idempotencyKey: string },
+  ) {
+    return apiRequest<{
+      item: import("@shadowproducer/contracts").CreatedInvitation
+      replayed: boolean
+    }>(
+      `${teamPath(teamId, "invitations")}/${encodeURIComponent(invitationId)}/rotate-token`,
+      { method: "POST", body: JSON.stringify(body) },
     )
   },
   getInvitation(token: string) {
@@ -1110,13 +1135,16 @@ export const assetApi = {
   contentUrl(teamId: string, assetId: string) {
     return `/api${teamPath(teamId, "assets")}/${encodeURIComponent(assetId)}/content`
   },
+  previewUrl(teamId: string, assetId: string) {
+    return `/api${teamPath(teamId, "assets")}/${encodeURIComponent(assetId)}/preview`
+  },
   getContentUrl(teamId: string, assetId: string) {
     return apiRequest<{ url: string }>(
       `${teamPath(teamId, "assets")}/${encodeURIComponent(assetId)}/content-url`,
     )
   },
   getReviewContentUrl(teamId: string, assetId: string) {
-    return apiRequest<{ url: string }>(
+    return playbackRequest<{ url: string }>(
       `${teamPath(teamId, "assets")}/${encodeURIComponent(assetId)}/review-content-url`,
     )
   },
@@ -1223,7 +1251,7 @@ export const publicPortfolioApi = {
     return apiRequest<PublicPortfolio>(`/portfolio/${encodeURIComponent(slug)}`)
   },
   getContentUrl(slug: string, contentId: string) {
-    return apiRequest<{ url: string }>(
+    return playbackRequest<{ url: string }>(
       `/portfolio/${encodeURIComponent(slug)}/contents/${encodeURIComponent(contentId)}/content-url`,
     )
   },

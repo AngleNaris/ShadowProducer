@@ -10,6 +10,7 @@ const teamCapabilities = new Set<PermissionCapability>([
   "team.read",
   "team.write",
   "team.permissions.manage",
+  "team.recycle.manage",
   "asset.write",
   "portfolio.write",
   "portfolio.publish",
@@ -36,7 +37,7 @@ function legacyCapabilities(role: string, scope: "team" | "project") {
       "portfolio.publish",
     ]
     if (["owner", "admin", "producer", "director"].includes(role)) {
-      permissions.push("team.permissions.manage")
+      permissions.push("team.permissions.manage", "team.recycle.manage")
     }
     return permissions
   }
@@ -103,7 +104,7 @@ export async function resolveProjectAccess(
 ) {
   let query = database
     .selectFrom("projects as project")
-    .innerJoin("team_memberships as team_membership", (join) =>
+    .leftJoin("team_memberships as team_membership", (join) =>
       join
         .onRef("team_membership.team_id", "=", "project.team_id")
         .on("team_membership.account_id", "=", actorId),
@@ -136,18 +137,24 @@ export async function resolveProjectAccess(
   const row = await query.executeTakeFirst()
   if (!row) return null
 
-  const teamAccess = access(
-    normalizedCapabilities(row.team_permissions, row.team_role, "team"),
-    "team",
-  )
   const project = normalizedCapabilities(
     row.project_permissions,
     row.project_role,
     "project",
   )
-  const effective = teamAccess.canRead
-    ? project.filter((permission) => permission === "project.read" || teamAccess.canWrite)
-    : []
+  const effective = row.team_role
+    ? (() => {
+        const teamAccess = access(
+          normalizedCapabilities(row.team_permissions, row.team_role, "team"),
+          "team",
+        )
+        return teamAccess.canRead
+          ? project.filter(
+              (permission) => permission === "project.read" || teamAccess.canWrite,
+            )
+          : []
+      })()
+    : project
   return access(effective, "project")
 }
 
@@ -158,7 +165,7 @@ export async function listProjectMemberAccesses(
   const rows = await database
     .selectFrom("project_memberships as project_membership")
     .innerJoin("projects as project", "project.id", "project_membership.project_id")
-    .innerJoin("team_memberships as team_membership", (join) =>
+    .leftJoin("team_memberships as team_membership", (join) =>
       join
         .onRef("team_membership.team_id", "=", "project.team_id")
         .onRef("team_membership.account_id", "=", "project_membership.account_id"),
@@ -186,25 +193,27 @@ export async function listProjectMemberAccesses(
     .execute()
 
   return rows.map((row) => {
-    const teamAccess = access(
-      normalizedCapabilities(row.team_permissions, row.team_role, "team"),
-      "team",
-    )
     const projectCapabilities = normalizedCapabilities(
       row.project_permissions,
       row.project_role,
       "project",
     )
+    const effective = row.team_role
+      ? (() => {
+          const teamAccess = access(
+            normalizedCapabilities(row.team_permissions, row.team_role, "team"),
+            "team",
+          )
+          return teamAccess.canRead
+            ? projectCapabilities.filter(
+                (capability) => capability === "project.read" || teamAccess.canWrite,
+              )
+            : []
+        })()
+      : projectCapabilities
     return {
       accountId: row.account_id,
-      access: access(
-        teamAccess.canRead
-          ? projectCapabilities.filter(
-              (capability) => capability === "project.read" || teamAccess.canWrite,
-            )
-          : [],
-        "project",
-      ),
+      access: access(effective, "project"),
     }
   })
 }

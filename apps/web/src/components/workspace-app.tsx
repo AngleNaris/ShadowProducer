@@ -251,6 +251,7 @@ function AuthenticatedWorkspace({
             activeView={route.view}
             currentTeam={currentTeam}
             currentProject={currentProject}
+            projectOnly={currentTeam.role === null}
             accountName={accountName}
             accountEmail={accountEmail}
             onNavigate={navigate}
@@ -338,14 +339,18 @@ function AuthenticatedWorkspace({
 
 function FullPageStatus({ children }: { children: string }) {
   return (
-    <main className="grid min-h-svh place-items-center bg-workspace text-sm text-muted-foreground">
+    <main
+      role="status"
+      className="grid min-h-svh place-items-center bg-workspace text-sm text-muted-foreground"
+    >
       {children}
     </main>
   )
 }
 
 function invitationRouteActive(hash: string, search: string): boolean {
-  if (hash.startsWith("#/invite")) return true
+  const hashPath = hash.split("?")[0]
+  if (hashPath === "#/invite" || hashPath.startsWith("#/invite/")) return true
   return new URLSearchParams(search.replace(/^\?/, "")).has("inviteToken")
 }
 
@@ -502,6 +507,7 @@ function AccountOnboarding({
           </div>
           <TeamOnboarding
             onCreateTeam={createTeamMutation.mutateAsync}
+            pending={createTeamMutation.isPending}
             title="开通团队空间"
             description="创建团队后即可开始协作；如果受邀加入已有团队，也可以在下方使用邀请链接。"
             successDetail="团队创建成功。重新载入后即可进入工作区。"
@@ -657,9 +663,13 @@ function InvitationAccept({
           aria-label="邀请已接受"
           className="w-full max-w-md border border-border bg-background p-6 text-center"
         >
-          <h1 className="text-xl font-semibold">已加入团队</h1>
+          <h1 className="text-xl font-semibold">
+            {accepted.scope === "project" ? "已加入项目" : "已加入团队"}
+          </h1>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            {`你已加入「${accepted.teamName}」。`}
+            {accepted.scope === "project"
+              ? `你已加入项目「${accepted.projectName ?? accepted.teamName}」。`
+              : `你已加入团队「${accepted.teamName}」。`}
           </p>
           <Button type="button" className="mt-6" autoFocus onClick={exitInvitationRoute}>
             进入工作区

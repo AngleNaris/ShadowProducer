@@ -125,6 +125,8 @@ export function TeamRecycleBin({ teamId }: { teamId: TeamId }) {
             {recycleQuery.data.items.map((item) => {
               const meta = typeMeta[item.kind]
               const Icon = meta.icon
+              const canManageShared = recycleQuery.data?.canManageShared ?? false
+              const sharedItem = item.kind === "team-contact" || item.kind === "supplier"
               const restoring =
                 restoreMutation.isPending && restoreMutation.variables?.id === item.id
               const deleting =
@@ -146,30 +148,34 @@ export function TeamRecycleBin({ teamId }: { teamId: TeamId }) {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={
-                        restoreMutation.isPending || permanentDeleteMutation.isPending
-                      }
-                      onClick={() => restoreMutation.mutate(item)}
-                    >
-                      <RotateCcw />
-                      {restoring ? "正在恢复" : "恢复"}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="sm"
-                      disabled={
-                        restoreMutation.isPending || permanentDeleteMutation.isPending
-                      }
-                      onClick={() => setPermanentDeleteItem(item)}
-                    >
-                      <Trash2 />
-                      {deleting ? "正在删除" : "永久删除"}
-                    </Button>
+                    {!sharedItem || canManageShared ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={
+                          restoreMutation.isPending || permanentDeleteMutation.isPending
+                        }
+                        onClick={() => restoreMutation.mutate(item)}
+                      >
+                        <RotateCcw />
+                        {restoring ? "正在恢复" : "恢复"}
+                      </Button>
+                    ) : null}
+                    {!sharedItem || canManageShared ? (
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        disabled={
+                          restoreMutation.isPending || permanentDeleteMutation.isPending
+                        }
+                        onClick={() => setPermanentDeleteItem(item)}
+                      >
+                        <Trash2 />
+                        {deleting ? "正在删除" : "永久删除"}
+                      </Button>
+                    ) : null}
                   </div>
                 </article>
               )

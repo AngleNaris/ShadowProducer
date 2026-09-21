@@ -43,7 +43,16 @@ export const TEAM_NAME_MAX_LENGTH = 80
 export const PROJECT_NAME_MAX_LENGTH = 80
 
 export const INVITATION_HASH_PREFIX = "#/invite"
-export const INVITATION_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{8,200}$/
+export const INVITATION_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{10,200}$/
+
+export function validateInvitationEmail(value: string): string | null {
+  const email = value.trim()
+  if (!email) return "请输入邀请邮箱"
+  if (email.length > 200 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return "请输入有效的邮箱地址"
+  }
+  return null
+}
 
 type TeamDraftFieldErrors = {
   teamName?: string[]
@@ -102,30 +111,41 @@ export function extractInvitationToken(input: {
   search?: string | null
 }): string | null {
   const hash = input.hash ?? ""
-  if (hash.startsWith(INVITATION_HASH_PREFIX)) {
+  const hashPath = hash.split("?")[0]
+  if (
+    hashPath === INVITATION_HASH_PREFIX ||
+    hashPath.startsWith(`${INVITATION_HASH_PREFIX}/`)
+  ) {
     const rest = hash.slice(INVITATION_HASH_PREFIX.length)
     if (rest.startsWith("/") && !rest.includes("?")) {
       const fromPath = decodeToken(rest.slice(1))
-      if (fromPath) return fromPath
+      if (fromPath && INVITATION_TOKEN_PATTERN.test(fromPath)) return fromPath
     }
     const queryIndex = rest.indexOf("?")
     if (queryIndex >= 0) {
       const fromHashQuery = tokenFromQuery(rest.slice(queryIndex))
-      if (fromHashQuery) return fromHashQuery
+      if (fromHashQuery && INVITATION_TOKEN_PATTERN.test(fromHashQuery))
+        return fromHashQuery
     }
   }
   const search = input.search ?? ""
   if (search) {
     const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search)
     const fromSearch = decodeToken(params.get("inviteToken"))
-    if (fromSearch) return fromSearch
+    if (fromSearch && INVITATION_TOKEN_PATTERN.test(fromSearch)) return fromSearch
   }
   return null
 }
 
 /** Returns the invite hash with any token removed, so tokens do not linger in history. */
 export function stripInvitationFromHash(hash: string): string {
-  if (!hash.startsWith(INVITATION_HASH_PREFIX)) return hash
+  const hashPath = hash.split("?")[0]
+  if (
+    hashPath !== INVITATION_HASH_PREFIX &&
+    !hashPath.startsWith(`${INVITATION_HASH_PREFIX}/`)
+  ) {
+    return hash
+  }
   return INVITATION_HASH_PREFIX
 }
 
@@ -171,6 +191,7 @@ export function isInvitationUnavailableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   const candidate = error as { code?: unknown; status?: unknown }
   return (
+    candidate.code === "INVITATION_NOT_FOUND" ||
     candidate.status === 410 ||
     candidate.code === "INVITATION_EXPIRED" ||
     candidate.code === "INVITATION_REVOKED" ||
@@ -181,6 +202,7 @@ export function isInvitationUnavailableError(error: unknown): boolean {
 export function isOnboardingFeatureUnavailableError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   const candidate = error as { code?: unknown; status?: unknown }
+  if (candidate.code === "INVITATION_NOT_FOUND") return false
   if (candidate.status === 404 || candidate.status === 501) return true
   return (
     candidate.code === "NOT_IMPLEMENTED" ||

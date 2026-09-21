@@ -41,6 +41,7 @@ export function TeamOnboarding({
   successDetail = "团队创建成功，正在刷新可访问工作区。",
   title = "创建团队",
   description = "创建后即可开始协作，并通过邀请链接邀请成员加入。",
+  pending = false,
 }: {
   onCreateTeam: (input: {
     teamName: string
@@ -49,6 +50,7 @@ export function TeamOnboarding({
   successDetail?: string
   title?: string
   description?: string
+  pending?: boolean
 }) {
   const [teamName, setTeamName] = useState("")
   const [projectName, setProjectName] = useState("")
@@ -61,6 +63,7 @@ export function TeamOnboarding({
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (pending) return
     setError("")
     const validation = validateTeamDraft({ teamName, projectName })
     if (!validation.ok) {
@@ -108,6 +111,7 @@ export function TeamOnboarding({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18, ease: "easeOut" }}
       aria-label={title}
+      aria-busy={pending}
       className="max-w-xl border border-border bg-background p-6"
     >
       <h2 className="text-lg font-semibold">{title}</h2>
@@ -149,8 +153,9 @@ export function TeamOnboarding({
             {error}
           </div>
         ) : null}
-        <Button type="submit" className="w-full sm:w-auto">
-          创建团队
+        <Button type="submit" className="w-full sm:w-auto" disabled={pending}>
+          {pending ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : null}
+          {pending ? "正在创建" : "创建团队"}
         </Button>
       </form>
     </motion.section>
@@ -198,7 +203,10 @@ function TeamSelectOnboarding() {
           </span>
         </div>
       ) : null}
-      <TeamOnboarding onCreateTeam={createTeamMutation.mutateAsync} />
+      <TeamOnboarding
+        onCreateTeam={createTeamMutation.mutateAsync}
+        pending={createTeamMutation.isPending}
+      />
     </div>
   )
 }

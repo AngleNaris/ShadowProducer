@@ -7,6 +7,7 @@ import type {
   CreateTeamCommand,
   PermissionAccess,
   RevokeInvitationCommand,
+  RotateInvitationTokenCommand,
   WorkspaceRepository,
 } from "@shadowproducer/application"
 import { WorkspaceService } from "@shadowproducer/application"
@@ -66,9 +67,13 @@ class MemoryOnboardingRepository implements WorkspaceRepository {
   revokeResult:
     | { kind: "ok"; item: { id: string } }
     | { kind: "not_found" }
-    | {
-        kind: "conflict"
-      } = { kind: "ok", item: { id: "invitation-1" } }
+    | { kind: "conflict" }
+    | { kind: "accepted" }
+    | { kind: "revoked" }
+    | { kind: "expired" } = { kind: "ok", item: { id: "invitation-1" } }
+  rotateResult: Awaited<ReturnType<WorkspaceRepository["rotateInvitationToken"]>> = {
+    kind: "not_found",
+  }
 
   constructor(private readonly access: PermissionAccess | null) {}
 
@@ -148,8 +153,16 @@ class MemoryOnboardingRepository implements WorkspaceRepository {
     return this.acceptanceResult
   }
 
-  async revokeInvitation() {
+  async revokeInvitation(
+    ..._args: Parameters<WorkspaceRepository["revokeInvitation"]>
+  ): Promise<Awaited<ReturnType<WorkspaceRepository["revokeInvitation"]>>> {
     return this.revokeResult
+  }
+
+  async rotateInvitationToken(
+    ..._args: Parameters<WorkspaceRepository["rotateInvitationToken"]>
+  ): Promise<Awaited<ReturnType<WorkspaceRepository["rotateInvitationToken"]>>> {
+    return this.rotateResult
   }
 
   async getContext() {
@@ -169,7 +182,13 @@ class MemoryOnboardingRepository implements WorkspaceRepository {
   async listNotifications(
     ..._args: Parameters<WorkspaceRepository["listNotifications"]>
   ): Promise<Awaited<ReturnType<WorkspaceRepository["listNotifications"]>>> {
-    return { items: [], unreadCount: 0 }
+    return {
+      items: [],
+      unreadCount: 0,
+      total: 0,
+      page: _args[2]?.page ?? 1,
+      pageSize: _args[2]?.pageSize ?? 50,
+    }
   }
 
   async updateNotification(
@@ -523,6 +542,49 @@ describe("workspace onboarding service", () => {
     expect(repository.acceptances).toEqual([command])
   })
 
+  it("rotates invitation tokens only for managers and maps every repository state", async () => {
+    const command = {
+      actorId: "account-fanxing",
+      teamId: "north",
+      itemId: "invitation-1",
+      expectedRevision: 1,
+      idempotencyKey: "rotate-invitation-1",
+    } satisfies RotateInvitationTokenCommand
+
+    await expect(
+      new WorkspaceService(
+        new MemoryOnboardingRepository(writeOnlyAccess()),
+      ).rotateInvitationToken(command),
+    ).rejects.toMatchObject({ code: "TEAM_PERMISSION_DENIED", statusCode: 403 })
+
+    for (const [result, expected] of [
+      [{ kind: "not_found" }, { code: "RESOURCE_NOT_FOUND", statusCode: 404 }],
+      [{ kind: "conflict" }, { code: "RESOURCE_CONFLICT", statusCode: 409 }],
+      [{ kind: "accepted" }, { code: "INVITATION_ALREADY_ACCEPTED", statusCode: 410 }],
+      [{ kind: "revoked" }, { code: "INVITATION_REVOKED", statusCode: 410 }],
+      [{ kind: "expired" }, { code: "INVITATION_EXPIRED", statusCode: 410 }],
+    ] as const) {
+      const repository = new MemoryOnboardingRepository(readAccess())
+      repository.rotateResult = result as Awaited<
+        ReturnType<WorkspaceRepository["rotateInvitationToken"]>
+      >
+      await expect(
+        new WorkspaceService(repository).rotateInvitationToken(command),
+      ).rejects.toMatchObject(expected)
+    }
+
+    const repository = new MemoryOnboardingRepository(readAccess())
+    repository.rotateResult = {
+      item: { ...invitationSummary(), token: "new-token" },
+      replayed: false,
+    }
+    await expect(
+      new WorkspaceService(repository).rotateInvitationToken(command),
+    ).resolves.toMatchObject({
+      replayed: false,
+      item: { token: "new-token" },
+    })
+  })
   it("revokes invitations with manage capability and maps repository results", async () => {
     const repository = new MemoryOnboardingRepository(writeOnlyAccess())
     const service = new WorkspaceService(repository)

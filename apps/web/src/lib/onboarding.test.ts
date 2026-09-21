@@ -11,28 +11,29 @@ import {
   parseInvitationReference,
   stripInvitationFromHash,
   stripInvitationFromSearch,
+  validateInvitationEmail,
   validateTeamDraft,
 } from "./onboarding.ts"
 
 test("invitation tokens are read from hash path, hash query, and page query", () => {
   assert.equal(
-    extractInvitationToken({ hash: "#/invite/token-123", search: "" }),
-    "token-123",
+    extractInvitationToken({ hash: "#/invite/token-1234", search: "" }),
+    "token-1234",
   )
   assert.equal(
-    extractInvitationToken({ hash: "#/invite?token=token-123", search: "" }),
-    "token-123",
+    extractInvitationToken({ hash: "#/invite?token=token-1234", search: "" }),
+    "token-1234",
   )
   assert.equal(
-    extractInvitationToken({ hash: "#/team-select", search: "?inviteToken=token-123" }),
-    "token-123",
+    extractInvitationToken({ hash: "#/team-select", search: "?inviteToken=token-1234" }),
+    "token-1234",
   )
   assert.equal(
     extractInvitationToken({
-      hash: `#/invite/${encodeURIComponent("secret/值")}`,
+      hash: "#/invite/secret-token",
       search: "",
     }),
-    "secret/值",
+    "secret-token",
   )
 })
 
@@ -44,15 +45,23 @@ test("invitation token extraction stays conservative", () => {
     extractInvitationToken({ hash: "#/team/a/calendar", search: "?token=nope" }),
     null,
   )
-  assert.equal(extractInvitationToken({ hash: "#/invite/%E5%80%BC", search: "" }), "值")
+  assert.equal(extractInvitationToken({ hash: "#/invite/%E5%80%BC", search: "" }), null)
   assert.equal(extractInvitationToken({ hash: "#/invite/%ZZ", search: "" }), null)
+  assert.equal(
+    extractInvitationToken({ hash: "#/invitefoo/token-1234", search: "" }),
+    null,
+  )
+  assert.equal(
+    extractInvitationToken({ hash: "#/invite/token-1234", search: "" }),
+    "token-1234",
+  )
 })
 
 test("strip helpers remove invitation tokens without disturbing other state", () => {
-  assert.equal(stripInvitationFromHash("#/invite/token-123"), "#/invite")
+  assert.equal(stripInvitationFromHash("#/invite/token-1234"), "#/invite")
   assert.equal(stripInvitationFromHash("#/invite"), "#/invite")
   assert.equal(stripInvitationFromHash("#/team/a/calendar"), "#/team/a/calendar")
-  assert.equal(stripInvitationFromSearch("?inviteToken=token-123"), "")
+  assert.equal(stripInvitationFromSearch("?inviteToken=token-1234"), "")
   assert.equal(stripInvitationFromSearch("?inviteToken=a&tab=1"), "?tab=1")
   assert.equal(stripInvitationFromSearch("?tab=1"), "?tab=1")
   assert.equal(stripInvitationFromSearch(""), "")
@@ -60,22 +69,33 @@ test("strip helpers remove invitation tokens without disturbing other state", ()
 
 test("invitation links encode the token and paste input is parsed", () => {
   assert.equal(
-    buildInvitationUrl("https://app.example.com/", "token-123"),
-    "https://app.example.com/#/invite/token-123",
+    buildInvitationUrl("https://app.example.com/", "token-1234"),
+    "https://app.example.com/#/invite/token-1234",
   )
   assert.equal(
-    parseInvitationReference("https://app.example.com/#/invite/token-123"),
-    "token-123",
+    parseInvitationReference("https://app.example.com/#/invite/token-1234"),
+    "token-1234",
   )
   assert.equal(
-    parseInvitationReference("https://app.example.com/?inviteToken=token-123"),
-    "token-123",
+    parseInvitationReference("https://app.example.com/?inviteToken=token-1234"),
+    "token-1234",
   )
-  assert.equal(parseInvitationReference("token-123"), "token-123")
-  assert.equal(parseInvitationReference("  token-123  "), "token-123")
+  assert.equal(parseInvitationReference("token-1234"), "token-1234")
+  assert.equal(parseInvitationReference("  token-1234  "), "token-1234")
   assert.equal(parseInvitationReference(""), null)
   assert.equal(parseInvitationReference("short"), null)
   assert.equal(parseInvitationReference("无效 token 文本"), null)
+})
+
+test("invitation email and token validation reject malformed references", () => {
+  assert.equal(validateInvitationEmail(" user@example.com "), null)
+  assert.equal(validateInvitationEmail(""), "请输入邀请邮箱")
+  assert.equal(validateInvitationEmail("user@example"), "请输入有效的邮箱地址")
+  assert.equal(validateInvitationEmail("user@@example.com"), "请输入有效的邮箱地址")
+  assert.equal(validateInvitationEmail("a@b.co"), null)
+  assert.equal(parseInvitationReference("short"), null)
+  assert.equal(parseInvitationReference("1234567890"), "1234567890")
+  assert.equal(parseInvitationReference("123456789"), null)
 })
 
 test("team drafts require a team name and treat the first project as optional", () => {
@@ -134,6 +154,24 @@ test("onboarding errors are classified without importing the api client", () => 
   )
 
   assert.equal(isInvitationUnavailableError(new Error("其他错误")), false)
+  assert.equal(
+    isInvitationUnavailableError(
+      Object.assign(new Error("邀请不存在"), {
+        code: "INVITATION_NOT_FOUND",
+        status: 404,
+      }),
+    ),
+    true,
+  )
+  assert.equal(
+    isOnboardingFeatureUnavailableError(
+      Object.assign(new Error("邀请不存在"), {
+        code: "INVITATION_NOT_FOUND",
+        status: 404,
+      }),
+    ),
+    false,
+  )
   assert.equal(
     isInvitationUnavailableError(
       Object.assign(new Error("邀请已被接受"), {

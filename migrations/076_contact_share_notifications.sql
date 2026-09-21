@@ -17,6 +17,8 @@ ALTER TABLE notifications
       'review_comment_replied',
       'review_file_approved',
       'contact_share_updated',
-      'contact_share_revoked'
+      'contact_share_revoked',
+      'team_invitation_accepted',
+      'project_invitation_accepted'
     )
   );

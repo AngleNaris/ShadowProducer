@@ -20,7 +20,7 @@ export function routeForTeam(team: WorkspaceTeam): WorkspaceRoute {
   return {
     teamId: team.id,
     projectId: team.projects[0]?.id ?? "",
-    view: "dashboard",
+    view: team.role === null && team.projects[0] ? "project" : "dashboard",
   }
 }
 
@@ -44,7 +44,12 @@ export function routeFromHash(
     const team = context.teams.find((candidate) => candidate.id === parts[1])
     const candidate =
       parts[2] === "contacts" || parts[2] === "assets" ? "resources" : parts[2]
-    if (team && isWorkspaceView(candidate) && getViewScope(candidate) !== "project") {
+    if (
+      team &&
+      team.role !== null &&
+      isWorkspaceView(candidate) &&
+      getViewScope(candidate) !== "project"
+    ) {
       return {
         teamId: team.id,
         projectId: team.projects[0]?.id ?? "",

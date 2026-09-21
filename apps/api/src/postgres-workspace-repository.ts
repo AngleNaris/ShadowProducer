@@ -16,6 +16,7 @@ import type {
   PermanentlyDeleteRecycleItemCommand,
   RestoreRecycleItemCommand,
   RevokeInvitationCommand,
+  RotateInvitationTokenCommand,
   UpdateCalendarEventCommand,
   UpdateNoteCommand,
   UpdateNotificationCommand,
@@ -47,6 +48,7 @@ import type {
   WorkspaceTask,
 } from "@shadowproducer/contracts"
 import type { Kysely, Transaction } from "kysely"
+import { sql } from "kysely"
 
 import type { Database } from "./database"
 import { resolveProjectAccess, resolveTeamAccess } from "./postgres-access"
@@ -76,6 +78,11 @@ function toIso(value: Date | string) {
 }
 
 const defaultInvitationExpiryDays = 7
+const invitationEmailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+function isInvitationEmail(value: string) {
+  return value.length >= 3 && value.length <= 200 && invitationEmailPattern.test(value)
+}
 
 const systemPermissionTemplates = [
   {
@@ -86,6 +93,7 @@ const systemPermissionTemplates = [
       "team.read",
       "team.write",
       "team.permissions.manage",
+      "team.recycle.manage",
       "asset.write",
       "portfolio.write",
       "portfolio.publish",
@@ -174,48 +182,90 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
       .orderBy("team.name", "asc")
       .execute()
 
-    const teams = await Promise.all(
-      memberships.map(async (membership) => {
-        const [countRow, projects] = await Promise.all([
-          this.database
-            .selectFrom("team_memberships")
-            .select((expression) => expression.fn.countAll<number>().as("count"))
-            .where("team_id", "=", membership.id)
-            .executeTakeFirstOrThrow(),
-          this.database
-            .selectFrom("project_memberships as membership")
-            .innerJoin("projects as project", "project.id", "membership.project_id")
-            .select([
-              "project.id",
-              "project.name",
-              "project.status",
-              "project.updated_at",
-              "membership.role",
-            ])
-            .where("membership.account_id", "=", actorId)
-            .where("project.team_id", "=", membership.id)
-            .orderBy("project.updated_at", "desc")
-            .execute(),
-        ])
+    const projectMemberships = await this.database
+      .selectFrom("project_memberships as membership")
+      .innerJoin("projects as project", "project.id", "membership.project_id")
+      .innerJoin("teams as team", "team.id", "project.team_id")
+      .select([
+        "team.id as team_id",
+        "team.name as team_name",
+        "project.id as project_id",
+        "project.name as project_name",
+        "project.status as project_status",
+        "project.updated_at as project_updated_at",
+        "membership.role as project_role",
+      ])
+      .where("membership.account_id", "=", actorId)
+      .orderBy("team.name", "asc")
+      .orderBy("project.updated_at", "desc")
+      .execute()
+
+    const projectsByTeam = new Map<string, (typeof projectMemberships)[number][]>()
+    for (const project of projectMemberships) {
+      const projects = projectsByTeam.get(project.team_id) ?? []
+      projects.push(project)
+      projectsByTeam.set(project.team_id, projects)
+    }
+    const teamMembershipIds = new Set(memberships.map((membership) => membership.id))
+    const memberCountByTeam = new Map<string, number>()
+    if (memberships.length > 0) {
+      const memberCounts = await this.database
+        .selectFrom("team_memberships")
+        .select((expression) => ["team_id", expression.fn.countAll<number>().as("count")])
+        .where(
+          "team_id",
+          "in",
+          memberships.map((membership) => membership.id),
+        )
+        .groupBy("team_id")
+        .execute()
+      for (const row of memberCounts) {
+        memberCountByTeam.set(row.team_id, Number(row.count))
+      }
+    }
+
+    const projectOnlyTeams = projectMemberships
+      .filter((project) => !teamMembershipIds.has(project.team_id))
+      .reduce<(typeof projectMemberships)[number]["team_id"][]>((ids, project) => {
+        if (!ids.includes(project.team_id)) ids.push(project.team_id)
+        return ids
+      }, [])
+      .map((teamId) => {
+        const first = projectsByTeam.get(teamId)?.[0]
         return {
-          id: membership.id,
-          name: membership.name,
-          role: membership.role,
-          memberCount: Number(countRow.count),
-          projects: projects.map((project) => ({
-            id: project.id,
-            name: project.name,
-            role: project.role,
-            status: project.status,
-            updatedAt: toIso(project.updated_at),
+          id: teamId,
+          name: first?.team_name ?? teamId,
+          role: null,
+          memberCount: 0,
+          projects: (projectsByTeam.get(teamId) ?? []).map((project) => ({
+            id: project.project_id,
+            name: project.project_name,
+            role: project.project_role,
+            status: project.project_status,
+            updatedAt: toIso(project.project_updated_at),
           })),
         }
-      }),
-    )
+      })
+
+    const teams = memberships.map((membership) => ({
+      id: membership.id,
+      name: membership.name,
+      role: membership.role,
+      memberCount: memberCountByTeam.get(membership.id) ?? 0,
+      projects: (projectsByTeam.get(membership.id) ?? []).map((project) => ({
+        id: project.project_id,
+        name: project.project_name,
+        role: project.project_role,
+        status: project.project_status,
+        updatedAt: toIso(project.project_updated_at),
+      })),
+    }))
 
     return {
       actor: { id: actor.id, displayName: actor.display_name },
-      teams,
+      teams: [...teams, ...projectOnlyTeams].sort((left, right) =>
+        left.name.localeCompare(right.name),
+      ),
     }
   }
 
@@ -240,6 +290,17 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
       .where("project.team_id", "=", teamId)
       .execute()
     const projectIds = projectRows.map((project) => project.id)
+    const hasTeamMembership = Boolean(
+      await resolveTeamAccess(this.database, actorId, teamId),
+    )
+    if (!hasTeamMembership && query.scope === "team" && !query.projectId) {
+      return {
+        items: [],
+        total: 0,
+        page: query.page,
+        pageSize: query.pageSize,
+      }
+    }
     const buildQuery = () => {
       let databaseQuery = this.database
         .selectFrom("audit_logs as audit")
@@ -249,6 +310,10 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
 
       if (query.projectId) {
         databaseQuery = databaseQuery.where("audit.project_id", "=", query.projectId)
+      } else if (!hasTeamMembership) {
+        databaseQuery = projectIds.length
+          ? databaseQuery.where("audit.project_id", "in", projectIds)
+          : databaseQuery.where("audit.project_id", "is", null)
       } else if (query.scope === "team" || projectIds.length === 0) {
         databaseQuery = databaseQuery.where("audit.project_id", "is", null)
       } else {
@@ -329,8 +394,12 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
     }
   }
 
-  async listNotifications(actorId: string, teamId: string) {
-    const [rows, unreadRow] = await Promise.all([
+  async listNotifications(
+    actorId: string,
+    teamId: string,
+    query: { page: number; pageSize: number },
+  ) {
+    const [rows, unreadRow, totalRow] = await Promise.all([
       this.notificationBase(this.database, actorId, teamId)
         .select([
           "notification.id",
@@ -349,16 +418,23 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
         ])
         .orderBy("notification.created_at", "desc")
         .orderBy("notification.id", "desc")
-        .limit(50)
+        .limit(query.pageSize)
+        .offset((query.page - 1) * query.pageSize)
         .execute(),
       this.notificationBase(this.database, actorId, teamId)
         .select((expression) => expression.fn.countAll<number>().as("count"))
         .where("notification.read_at", "is", null)
         .executeTakeFirstOrThrow(),
+      this.notificationBase(this.database, actorId, teamId)
+        .select((expression) => expression.fn.countAll<number>().as("count"))
+        .executeTakeFirstOrThrow(),
     ])
     return {
       items: rows.map((row) => this.mapNotification(row)),
       unreadCount: Number(unreadRow.count),
+      total: Number(totalRow.count),
+      page: query.page,
+      pageSize: query.pageSize,
     }
   }
 
@@ -522,6 +598,7 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
       this.database
         .selectFrom("project_memberships as membership")
         .innerJoin("projects as project", "project.id", "membership.project_id")
+        .innerJoin("accounts as account", "account.id", "membership.account_id")
         .leftJoin(
           "permission_templates as template",
           "template.id",
@@ -532,6 +609,7 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
           "membership.role",
           "membership.permission_template_id",
           "membership.permission_revision",
+          "account.display_name",
           "project.id as project_id",
           "project.name as project_name",
           "template.name as template_name",
@@ -566,19 +644,41 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
       projectsByAccount.set(row.account_id, projects)
     }
 
+    const teamMemberIds = new Set(teamMembershipRows.map((row) => row.account_id))
+    const projectOnlyMembers = projectMembershipRows
+      .filter((row) => !teamMemberIds.has(row.account_id))
+      .reduce<typeof projectMembershipRows>((members, row) => {
+        if (!members.some((member) => member.account_id === row.account_id)) {
+          members.push(row)
+        }
+        return members
+      }, [])
+      .map((row) => ({
+        accountId: row.account_id,
+        displayName: row.display_name,
+        role: null,
+        permissionTemplateId: null,
+        permissionTemplateName: null,
+        permissionRevision: null,
+        projects: projectsByAccount.get(row.account_id) ?? [],
+      }))
+
     return {
       templates: templateRows.map((row) =>
         this.mapPermissionTemplate(row, assignedCount.get(row.id) ?? 0),
       ),
-      members: teamMembershipRows.map((row) => ({
-        accountId: row.account_id,
-        displayName: row.display_name,
-        role: row.role,
-        permissionTemplateId: row.permission_template_id,
-        permissionTemplateName: row.template_name,
-        permissionRevision: row.permission_revision,
-        projects: projectsByAccount.get(row.account_id) ?? [],
-      })),
+      members: [
+        ...teamMembershipRows.map((row) => ({
+          accountId: row.account_id,
+          displayName: row.display_name,
+          role: row.role,
+          permissionTemplateId: row.permission_template_id,
+          permissionTemplateName: row.template_name,
+          permissionRevision: row.permission_revision,
+          projects: projectsByAccount.get(row.account_id) ?? [],
+        })),
+        ...projectOnlyMembers,
+      ].sort((left, right) => left.displayName.localeCompare(right.displayName)),
     }
   }
 
@@ -944,132 +1044,186 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
     })
   }
 
+  private isPendingInvitationUniqueViolation(error: unknown) {
+    if (!error || typeof error !== "object") return false
+    const value = error as { code?: string; constraint?: string }
+    return (
+      value.code === "23505" &&
+      (value.constraint === "onboarding_invitations_team_pending_uidx" ||
+        value.constraint === "onboarding_invitations_project_pending_uidx")
+    )
+  }
+
   async createInvitation(command: CreateInvitationCommand) {
-    return this.database.transaction().execute(async (transaction) => {
-      const email = command.email.trim().toLowerCase()
-      const hash = requestHash({ ...command, email })
-      const domain = `invitation.create:${command.teamId}`
-      const replay = await this.getReceipt<CreatedInvitation>(
-        transaction,
-        command.actorId,
-        domain,
-        command.idempotencyKey,
-        hash,
-      )
-      if (replay) return { item: replay, replayed: true }
+    try {
+      return await this.database.transaction().execute(async (transaction) => {
+        const email = command.email.trim().toLowerCase()
+        if (!isInvitationEmail(email)) {
+          throw new AppError("INVITATION_EMAIL_INVALID", "请输入有效的邀请邮箱", 400)
+        }
+        const hash = requestHash({ ...command, email })
+        const domain = `invitation.create:${command.teamId}`
+        const replay = await this.getReceipt<CreatedInvitation>(
+          transaction,
+          command.actorId,
+          domain,
+          command.idempotencyKey,
+          hash,
+        )
+        if (replay) return { item: replay, replayed: true }
 
-      const selfAccount = await transaction
-        .selectFrom("accounts")
-        .select("email")
-        .where("id", "=", command.actorId)
-        .executeTakeFirst()
-      if (selfAccount?.email && selfAccount.email.toLowerCase() === email) {
-        throw new AppError("INVITATION_SELF_FORBIDDEN", "不能邀请自己的账号邮箱", 409)
-      }
-
-      let projectId: string | null = null
-      if (command.scope === "project") {
-        const project = await transaction
-          .selectFrom("projects")
-          .select("id")
-          .where("id", "=", command.projectId ?? "")
-          .where("team_id", "=", command.teamId)
+        const selfAccount = await transaction
+          .selectFrom("accounts")
+          .select("email")
+          .where("id", "=", command.actorId)
           .executeTakeFirst()
-        if (!project) {
+        if (selfAccount?.email && selfAccount.email.toLowerCase() === email) {
+          throw new AppError("INVITATION_SELF_FORBIDDEN", "不能邀请自己的账号邮箱", 409)
+        }
+
+        let projectId: string | null = null
+        if (command.scope === "project") {
+          const project = await transaction
+            .selectFrom("projects")
+            .select("id")
+            .where("id", "=", command.projectId ?? "")
+            .where("team_id", "=", command.teamId)
+            .executeTakeFirst()
+          if (!project) {
+            throw new AppError(
+              "INVITATION_PROJECT_INVALID",
+              "邀请的项目不存在或不在当前团队",
+              404,
+            )
+          }
+          projectId = project.id
+        }
+
+        const existingMembership =
+          command.scope === "team"
+            ? await transaction
+                .selectFrom("team_memberships")
+                .select("account_id")
+                .where("team_id", "=", command.teamId)
+                .where(
+                  "account_id",
+                  "in",
+                  transaction
+                    .selectFrom("accounts")
+                    .select("id")
+                    .where("email", "=", email),
+                )
+                .executeTakeFirst()
+            : await transaction
+                .selectFrom("project_memberships as membership")
+                .innerJoin("accounts as account", "account.id", "membership.account_id")
+                .select("membership.account_id")
+                .where("membership.project_id", "=", projectId ?? "")
+                .where("account.email", "=", email)
+                .executeTakeFirst()
+        if (existingMembership) {
           throw new AppError(
-            "INVITATION_PROJECT_INVALID",
-            "邀请的项目不存在或不在当前团队",
-            404,
+            "INVITATION_MEMBER_EXISTS",
+            command.scope === "team" ? "该邮箱已是团队成员" : "该邮箱已是项目成员",
+            409,
           )
         }
-        projectId = project.id
-      }
 
-      let templateId = command.permissionTemplateId ?? null
-      if (templateId) {
-        const template = await transaction
-          .selectFrom("permission_templates")
+        let templateId = command.permissionTemplateId ?? null
+        if (templateId) {
+          const template = await transaction
+            .selectFrom("permission_templates")
+            .select("id")
+            .where("id", "=", templateId)
+            .where("team_id", "=", command.teamId)
+            .where("scope", "=", command.scope)
+            .executeTakeFirst()
+          if (!template) {
+            throw new AppError(
+              "PERMISSION_TEMPLATE_INVALID",
+              "权限模板不属于当前作用域",
+              400,
+            )
+          }
+        } else {
+          const defaultKey =
+            command.scope === "team" ? "team-member" : "project-contributor"
+          const template = await transaction
+            .selectFrom("permission_templates")
+            .select("id")
+            .where("team_id", "=", command.teamId)
+            .where("scope", "=", command.scope)
+            .where("key", "=", defaultKey)
+            .executeTakeFirst()
+          if (!template) {
+            throw new AppError("SYSTEM_TEMPLATE_MISSING", "系统权限模板缺失", 500)
+          }
+          templateId = template.id
+        }
+
+        const pendingQuery = transaction
+          .selectFrom("onboarding_invitations")
           .select("id")
-          .where("id", "=", templateId)
           .where("team_id", "=", command.teamId)
-          .where("scope", "=", command.scope)
-          .executeTakeFirst()
-        if (!template) {
+          .where("email", "=", email)
+          .where("status", "=", "pending")
+        const pending = await (command.scope === "project"
+          ? pendingQuery.where("project_id", "=", projectId ?? "")
+          : pendingQuery.where("project_id", "is", null)
+        ).executeTakeFirst()
+        if (pending) {
           throw new AppError(
-            "PERMISSION_TEMPLATE_INVALID",
-            "权限模板不属于当前作用域",
-            400,
+            "INVITATION_PENDING_EXISTS",
+            "该邮箱已有待处理的同类邀请",
+            409,
           )
         }
-      } else {
-        const defaultKey =
-          command.scope === "team" ? "team-member" : "project-contributor"
-        const template = await transaction
-          .selectFrom("permission_templates")
-          .select("id")
-          .where("team_id", "=", command.teamId)
-          .where("scope", "=", command.scope)
-          .where("key", "=", defaultKey)
-          .executeTakeFirst()
-        if (!template) {
-          throw new AppError("SYSTEM_TEMPLATE_MISSING", "系统权限模板缺失", 500)
-        }
-        templateId = template.id
-      }
 
-      const pendingQuery = transaction
-        .selectFrom("onboarding_invitations")
-        .select("id")
-        .where("team_id", "=", command.teamId)
-        .where("email", "=", email)
-        .where("status", "=", "pending")
-      const pending = await (command.scope === "project"
-        ? pendingQuery.where("project_id", "=", projectId ?? "")
-        : pendingQuery.where("project_id", "is", null)
-      ).executeTakeFirst()
-      if (pending) {
+        const expiryDays = command.expiresInDays ?? defaultInvitationExpiryDays
+        const token = randomBytes(32).toString("base64url")
+        const id = randomUUID()
+        await transaction
+          .insertInto("onboarding_invitations")
+          .values({
+            id,
+            team_id: command.teamId,
+            project_id: projectId,
+            scope: command.scope,
+            email,
+            token_hash: createHash("sha256").update(token).digest("hex"),
+            permission_template_id: templateId,
+            role: "member",
+            invited_by_account_id: command.actorId,
+            expires_at: new Date(Date.now() + expiryDays * 24 * 60 * 60 * 1000),
+          })
+          .execute()
+        const summary = await this.findInvitationById(transaction, id)
+        if (!summary) throw new Error("Created invitation could not be read")
+        const item: CreatedInvitation = { ...summary, token }
+        await this.writeReceipt(
+          transaction,
+          command.actorId,
+          domain,
+          command.idempotencyKey,
+          hash,
+          // The one-time token is returned once and never persisted, including receipts.
+          { ...summary },
+        )
+        await this.writeAudit(
+          transaction,
+          { actorId: command.actorId, teamId: command.teamId, projectId },
+          "invitation.created",
+          id,
+          { email, scope: command.scope },
+        )
+        return { item, replayed: false }
+      })
+    } catch (error) {
+      if (this.isPendingInvitationUniqueViolation(error)) {
         throw new AppError("INVITATION_PENDING_EXISTS", "该邮箱已有待处理的同类邀请", 409)
       }
-
-      const expiryDays = command.expiresInDays ?? defaultInvitationExpiryDays
-      const token = randomBytes(32).toString("base64url")
-      const id = randomUUID()
-      await transaction
-        .insertInto("onboarding_invitations")
-        .values({
-          id,
-          team_id: command.teamId,
-          project_id: projectId,
-          scope: command.scope,
-          email,
-          token_hash: createHash("sha256").update(token).digest("hex"),
-          permission_template_id: templateId,
-          role: "member",
-          invited_by_account_id: command.actorId,
-          expires_at: new Date(Date.now() + expiryDays * 24 * 60 * 60 * 1000),
-        })
-        .execute()
-      const summary = await this.findInvitationById(transaction, id)
-      if (!summary) throw new Error("Created invitation could not be read")
-      const item: CreatedInvitation = { ...summary, token }
-      await this.writeReceipt(
-        transaction,
-        command.actorId,
-        domain,
-        command.idempotencyKey,
-        hash,
-        // The one-time token is returned once and never persisted, including receipts.
-        { ...summary },
-      )
-      await this.writeAudit(
-        transaction,
-        { actorId: command.actorId, teamId: command.teamId, projectId },
-        "invitation.created",
-        id,
-        { email, scope: command.scope },
-      )
-      return { item, replayed: false }
-    })
+      throw error
+    }
   }
 
   async listInvitations(teamId: string) {
@@ -1308,15 +1462,16 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
     return this.database.transaction().execute(async (transaction) => {
       const existing = await transaction
         .selectFrom("onboarding_invitations")
-        .select(["revision", "status"])
+        .select(["revision", "status", "expires_at"])
         .where("id", "=", command.itemId)
         .where("team_id", "=", command.teamId)
+        .forUpdate()
         .executeTakeFirst()
       if (!existing) return { kind: "not_found" } as const
-      if (
-        existing.status !== "pending" ||
-        existing.revision !== command.expectedRevision
-      ) {
+      if (existing.status === "accepted") return { kind: "accepted" } as const
+      if (existing.status === "revoked") return { kind: "revoked" } as const
+      if (existing.expires_at.getTime() <= Date.now()) return { kind: "expired" } as const
+      if (existing.revision !== command.expectedRevision) {
         return { kind: "conflict" } as const
       }
       const revoked = await transaction
@@ -1338,6 +1493,72 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
         {},
       )
       return { kind: "ok", item: { id: revoked.id } } as const
+    })
+  }
+
+  async rotateInvitationToken(command: RotateInvitationTokenCommand) {
+    return this.database.transaction().execute(async (transaction) => {
+      const hash = requestHash(command)
+      const domain = `invitation.rotate-token:${command.teamId}`
+      const replay = await this.getReceipt<CreatedInvitation>(
+        transaction,
+        command.actorId,
+        domain,
+        command.idempotencyKey,
+        hash,
+      )
+      if (replay) return { item: replay, replayed: true } as const
+
+      const invitation = await transaction
+        .selectFrom("onboarding_invitations")
+        .select(["id", "revision", "status", "expires_at"])
+        .where("id", "=", command.itemId)
+        .where("team_id", "=", command.teamId)
+        .forUpdate()
+        .executeTakeFirst()
+      if (!invitation) return { kind: "not_found" } as const
+      if (invitation.status === "accepted") return { kind: "accepted" } as const
+      if (invitation.status === "revoked") return { kind: "revoked" } as const
+      if (invitation.expires_at.getTime() <= Date.now())
+        return { kind: "expired" } as const
+      if (invitation.revision !== command.expectedRevision)
+        return { kind: "conflict" } as const
+
+      const token = randomBytes(32).toString("base64url")
+      const updated = await transaction
+        .updateTable("onboarding_invitations")
+        .set({
+          token_hash: createHash("sha256").update(token).digest("hex"),
+          updated_at: new Date(),
+        })
+        .set((expression) => ({ revision: expression("revision", "+", 1) }))
+        .where("id", "=", command.itemId)
+        .where("team_id", "=", command.teamId)
+        .where("status", "=", "pending")
+        .where("revision", "=", command.expectedRevision)
+        .returning("id")
+        .executeTakeFirst()
+      if (!updated) return { kind: "conflict" } as const
+      const summary = await this.findInvitationById(transaction, updated.id)
+      if (!summary) throw new Error("Rotated invitation could not be read")
+      await this.writeReceipt(
+        transaction,
+        command.actorId,
+        domain,
+        command.idempotencyKey,
+        hash,
+        summary,
+      )
+      await this.writeAudit(
+        transaction,
+        command,
+        "invitation.token_rotated",
+        updated.id,
+        {
+          revision: summary.revision,
+        },
+      )
+      return { item: { ...summary, token }, replayed: false } as const
     })
   }
 
@@ -2115,7 +2336,7 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
   private notificationBase(database: DatabaseExecutor, actorId: string, teamId: string) {
     return database
       .selectFrom("notifications as notification")
-      .innerJoin("team_memberships as team_membership", (join) =>
+      .leftJoin("team_memberships as team_membership", (join) =>
         join
           .onRef("team_membership.team_id", "=", "notification.team_id")
           .on("team_membership.account_id", "=", actorId),
@@ -2133,6 +2354,15 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
       )
       .where("notification.recipient_account_id", "=", actorId)
       .where("notification.team_id", "=", teamId)
+      .where((expression) =>
+        expression.or([
+          expression("team_membership.account_id", "is not", null),
+          expression.and([
+            expression("notification.project_id", "is not", null),
+            expression("project_membership.account_id", "is not", null),
+          ]),
+        ]),
+      )
       .where((expression) =>
         expression.or([
           expression("notification.project_id", "is", null),
@@ -2458,6 +2688,9 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
     key: string,
     hash: string,
   ) {
+    await sql`select pg_advisory_xact_lock(
+      hashtextextended(${`${actorId}:${domain}:${key}`}, 0)
+    )`.execute(database)
     const row = await database
       .selectFrom("command_receipts")
       .select(["response", "request_hash"])

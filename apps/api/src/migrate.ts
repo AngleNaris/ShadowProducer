@@ -84,6 +84,7 @@ try {
         "team.read",
         "team.write",
         "team.permissions.manage",
+        "team.recycle.manage",
         "asset.write",
         "portfolio.write",
         "portfolio.publish",

@@ -46,7 +46,7 @@ SELECT team.id || ':' || template.key,
 FROM teams AS team
 CROSS JOIN (
   VALUES
-    ('team', 'team-admin', '团队管理员', '["team.read","team.write","team.permissions.manage","asset.write","portfolio.write","portfolio.publish"]'),
+    ('team', 'team-admin', '团队管理员', '["team.read","team.write","team.permissions.manage","team.recycle.manage","asset.write","portfolio.write","portfolio.publish"]'),
     ('team', 'team-member', '团队成员', '["team.read","team.write","asset.write","portfolio.write","portfolio.publish"]'),
     ('team', 'team-viewer', '团队访客', '["team.read"]'),
     ('project', 'project-manager', '项目负责人', '["project.read","project.write","script.write","production.write","call_sheet.publish","review.write","review.manage"]'),

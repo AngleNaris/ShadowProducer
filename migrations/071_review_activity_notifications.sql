@@ -14,6 +14,11 @@ ALTER TABLE notifications
       'portfolio_published',
       'portfolio_unpublished',
       'review_comment_created',
-      'review_file_approved'
+      'review_comment_replied',
+      'review_file_approved',
+      'contact_share_updated',
+      'contact_share_revoked',
+      'team_invitation_accepted',
+      'project_invitation_accepted'
     )
   );

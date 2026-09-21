@@ -3855,6 +3855,27 @@ describe("Agent command API", () => {
     expect(writes.calendarUpdates).toBe(1)
   })
 
+  it("rejects impossible dates when updating a calendar event", async () => {
+    const { app, writes } = await createTestApp()
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/agent/commands/preview",
+      headers: { "x-shadow-account-id": "account-fanxing" },
+      payload: {
+        action: "update_calendar_event",
+        teamId: "north",
+        projectId: "winter-coffee",
+        eventTitle: "Agent 日程",
+        startsAt: "2026-02-31T08:00:00.000Z",
+        timezone: "Asia/Shanghai",
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.json().code).toBe("INVALID_DATE")
+    expect(writes.calendarUpdates).toBe(0)
+  })
+
   it("requires a unique calendar event selection before creating an intent", async () => {
     const { app } = await createTestApp({
       calendarEvents: [

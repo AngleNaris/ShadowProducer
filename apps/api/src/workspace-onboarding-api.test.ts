@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto"
 import type { ScriptRepository, WorkspaceRepository } from "@shadowproducer/application"
-import { AppError, ScriptService, WorkspaceService } from "@shadowproducer/application"
+import {
+  AppError,
+  type CreateInvitationCommand,
+  ScriptService,
+  WorkspaceService,
+} from "@shadowproducer/application"
 import type {
   InvitationSummary,
   OnboardingProject,
@@ -13,6 +18,8 @@ import type { AuthGateway } from "./auth"
 
 const token = "valid-invitation-token-abc123"
 const tokenHash = createHash("sha256").update(token).digest("hex")
+const projectToken = "project-invitation-token-abc123"
+const projectTokenHash = createHash("sha256").update(projectToken).digest("hex")
 const now = "2026-09-04T08:00:00.000Z"
 
 function summary(status: InvitationSummary["status"] = "pending"): InvitationSummary {
@@ -39,8 +46,26 @@ function summary(status: InvitationSummary["status"] = "pending"): InvitationSum
   }
 }
 
+function projectSummary(): InvitationSummary {
+  return {
+    ...summary(),
+    id: "project-invitation-1",
+    projectId: "winter-coffee",
+    projectName: "冬夜咖啡",
+    scope: "project",
+    email: "invitee@shadowproducer.local",
+    permissionTemplateId: "north:project-contributor",
+    permissionTemplateName: "项目协作者",
+  }
+}
+
 function createRepository() {
   let invitation = summary()
+  let createInvitationError: Error | null = null
+  let rotateResult: Awaited<ReturnType<WorkspaceRepository["rotateInvitationToken"]>> = {
+    item: { ...summary(), token },
+    replayed: false,
+  }
   const acceptedActors: string[] = []
   const repository = {
     getTeamAccess: async () => ({
@@ -70,34 +95,51 @@ function createRepository() {
       },
       replayed: false,
     }),
-    createInvitation: async () => ({
-      item: { ...invitation, token },
-      replayed: false,
-    }),
+    createInvitation: async (command: CreateInvitationCommand) => {
+      if (createInvitationError) throw createInvitationError
+      const item = command.scope === "project" ? projectSummary() : invitation
+      return {
+        item: { ...item, token: command.scope === "project" ? projectToken : token },
+        replayed: false,
+      }
+    },
     listInvitations: async () => [invitation],
-    findInvitationByTokenHash: async (hash: string) =>
-      hash === tokenHash ? invitation : null,
-    acceptInvitation: async (command: { actorId: string }) => {
+    findInvitationByTokenHash: async (hash: string) => {
+      if (hash === projectTokenHash) return projectSummary()
+      return hash === tokenHash ? invitation : null
+    },
+    acceptInvitation: async (command: { actorId: string; token?: string }) => {
       acceptedActors.push(command.actorId)
+      const project = command.token === projectToken
+      const acceptedInvitation = project ? projectSummary() : invitation
       return {
         item: {
-          invitationId: invitation.id,
-          scope: "team",
-          teamId: invitation.teamId,
-          teamName: invitation.teamName,
-          projectId: null,
-          projectName: null,
-          role: "member",
-          permissionTemplateId: invitation.permissionTemplateId,
-          permissionTemplateName: invitation.permissionTemplateName,
+          invitationId: acceptedInvitation.id,
+          scope: acceptedInvitation.scope,
+          teamId: acceptedInvitation.teamId,
+          teamName: acceptedInvitation.teamName,
+          projectId: acceptedInvitation.projectId,
+          projectName: acceptedInvitation.projectName,
+          role: acceptedInvitation.role,
+          permissionTemplateId: acceptedInvitation.permissionTemplateId,
+          permissionTemplateName: acceptedInvitation.permissionTemplateName,
         },
         replayed: false,
       }
     },
     revokeInvitation: async () => ({ kind: "conflict" as const }),
+    rotateInvitationToken: async () => rotateResult,
     acceptedActors,
     setInvitationStatus(status: InvitationSummary["status"]) {
       invitation = summary(status)
+    },
+    setCreateInvitationError(error: Error | null) {
+      createInvitationError = error
+    },
+    setRotateResult(
+      result: Awaited<ReturnType<WorkspaceRepository["rotateInvitationToken"]>>,
+    ) {
+      rotateResult = result
     },
   }
   return repository
@@ -212,5 +254,109 @@ describe("workspace onboarding HTTP routes", () => {
     expect(expired.json().code).toBe("INVITATION_ALREADY_ACCEPTED")
     expect(revoked.statusCode).toBe(409)
     expect(revoked.json().code).toBe("RESOURCE_CONFLICT")
+  })
+
+  it("validates invitation email at the route boundary and maps pending conflicts", async () => {
+    const { app, repository } = await createTestApp()
+    const headers = { cookie: "shadow-session=valid" }
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/v1/teams/north/invitations",
+      headers,
+      payload: {
+        scope: "team",
+        email: "not-an-email",
+        idempotencyKey: "invite-http-invalid",
+      },
+    })
+    repository.setCreateInvitationError(
+      new AppError("INVITATION_PENDING_EXISTS", "该邮箱已有待处理的同类邀请", 409),
+    )
+    const duplicate = await app.inject({
+      method: "POST",
+      url: "/v1/teams/north/invitations",
+      headers,
+      payload: {
+        scope: "team",
+        email: "invitee@shadowproducer.local",
+        idempotencyKey: "invite-http-duplicate",
+      },
+    })
+
+    expect(invalid.statusCode).toBe(400)
+    expect(invalid.json().code).toBe("VALIDATION_FAILED")
+    expect(duplicate.statusCode).toBe(409)
+    expect(duplicate.json().code).toBe("INVITATION_PENDING_EXISTS")
+  })
+
+  it("returns a one-time rotate token, omits it on replay, and maps stale revisions", async () => {
+    const { app, repository } = await createTestApp()
+    const headers = { cookie: "shadow-session=valid" }
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/teams/north/invitations/invitation-1/rotate-token",
+      headers,
+      payload: { expectedRevision: 1, idempotencyKey: "rotate-http-1" },
+    })
+    repository.setRotateResult({
+      item: summary(),
+      replayed: true,
+    })
+    const replay = await app.inject({
+      method: "POST",
+      url: "/v1/teams/north/invitations/invitation-1/rotate-token",
+      headers,
+      payload: { expectedRevision: 1, idempotencyKey: "rotate-http-1" },
+    })
+    repository.setRotateResult({ kind: "conflict" })
+    const stale = await app.inject({
+      method: "POST",
+      url: "/v1/teams/north/invitations/invitation-1/rotate-token",
+      headers,
+      payload: { expectedRevision: 1, idempotencyKey: "rotate-http-stale" },
+    })
+
+    expect(first.statusCode).toBe(201)
+    expect(first.json()).toMatchObject({
+      replayed: false,
+      item: { id: "invitation-1", token },
+    })
+    expect(replay.statusCode).toBe(200)
+    expect(replay.json()).toMatchObject({
+      replayed: true,
+      item: { id: "invitation-1" },
+    })
+    expect(replay.json().item.token).toBeUndefined()
+    expect(stale.statusCode).toBe(409)
+    expect(stale.json().code).toBe("RESOURCE_CONFLICT")
+  })
+  it("returns project scope and project identity when accepting a project invitation", async () => {
+    const { app, repository } = await createTestApp()
+    const headers = { cookie: "shadow-session=valid" }
+    const preview = await app.inject({
+      method: "GET",
+      url: `/invitations/${projectToken}`,
+    })
+    const accepted = await app.inject({
+      method: "POST",
+      url: `/invitations/${projectToken}/accept`,
+      headers,
+      payload: { idempotencyKey: "accept-project-http-1" },
+    })
+
+    expect(preview.statusCode).toBe(200)
+    expect(preview.json()).toMatchObject({
+      item: { scope: "project", projectId: "winter-coffee", projectName: "冬夜咖啡" },
+    })
+    expect(accepted.statusCode).toBe(201)
+    expect(accepted.json()).toMatchObject({
+      replayed: false,
+      item: {
+        scope: "project",
+        projectId: "winter-coffee",
+        projectName: "冬夜咖啡",
+      },
+    })
+    expect(repository.acceptedActors).toEqual(["account-fanxing"])
   })
 })

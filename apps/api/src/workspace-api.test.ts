@@ -235,10 +235,20 @@ class MemoryWorkspaceRepository implements WorkspaceRepository {
     }
   }
 
-  async getTeamAccess(actorId: string, teamId: string) {
-    return actorId === "account-fanxing" && teamId === "north"
-      ? { canRead: true, canWrite: true }
-      : null
+  async getTeamAccess(
+    actorId: string,
+    teamId: string,
+  ): Promise<Awaited<ReturnType<WorkspaceRepository["getTeamAccess"]>>> {
+    if (teamId !== "north") return null
+    if (actorId === "account-fanxing") return { canRead: true, canWrite: true }
+    if (actorId === "account-linqiao") {
+      return {
+        canRead: true,
+        canWrite: true,
+        capabilities: ["team.read", "team.write"],
+      }
+    }
+    return null
   }
 
   async getProjectAccess(actorId: string, teamId: string, projectId: string) {
@@ -272,14 +282,22 @@ class MemoryWorkspaceRepository implements WorkspaceRepository {
     }
   }
 
-  async listNotifications(actorId: string, teamId: string) {
-    const items =
+  async listNotifications(
+    actorId: string,
+    teamId: string,
+    query: { page: number; pageSize: number },
+  ) {
+    const allItems =
       actorId === "account-fanxing"
         ? this.notifications.filter((item) => item.teamId === teamId)
         : []
+    const offset = (query.page - 1) * query.pageSize
     return {
-      items: structuredClone(items),
-      unreadCount: items.filter((item) => !item.readAt).length,
+      items: structuredClone(allItems.slice(offset, offset + query.pageSize)),
+      unreadCount: allItems.filter((item) => !item.readAt).length,
+      total: allItems.length,
+      page: query.page,
+      pageSize: query.pageSize,
     }
   }
 
@@ -447,6 +465,10 @@ class MemoryWorkspaceRepository implements WorkspaceRepository {
 
   async revokeInvitation(): Promise<never> {
     throw new Error("not used by workspace API tests")
+  }
+
+  async rotateInvitationToken() {
+    return { kind: "not_found" } as const
   }
 
   async listTasks(actorId: string, teamId: string) {
@@ -753,7 +775,47 @@ describe("workspace productivity API", () => {
       headers: authHeaders,
     })
     expect(listed.statusCode).toBe(200)
-    expect(listed.json()).toMatchObject({ unreadCount: 1 })
+    expect(listed.json()).toMatchObject({
+      unreadCount: 1,
+      total: 1,
+      page: 1,
+      pageSize: 50,
+    })
+
+    const secondPage = await app.inject({
+      method: "GET",
+      url: "/v1/teams/north/notifications?page=2&pageSize=1",
+      headers: authHeaders,
+    })
+    expect(secondPage.statusCode).toBe(200)
+    expect(secondPage.json()).toEqual({
+      items: [],
+      unreadCount: 1,
+      total: 1,
+      page: 2,
+      pageSize: 1,
+    })
+
+    const maximumPageSize = await app.inject({
+      method: "GET",
+      url: "/v1/teams/north/notifications?pageSize=100",
+      headers: authHeaders,
+    })
+    expect(maximumPageSize.statusCode).toBe(200)
+    expect(maximumPageSize.json().pageSize).toBe(100)
+
+    const invalidPage = await app.inject({
+      method: "GET",
+      url: "/v1/teams/north/notifications?page=0",
+      headers: authHeaders,
+    })
+    const invalidPageSize = await app.inject({
+      method: "GET",
+      url: "/v1/teams/north/notifications?pageSize=101",
+      headers: authHeaders,
+    })
+    expect(invalidPage.statusCode).toBe(400)
+    expect(invalidPageSize.statusCode).toBe(400)
 
     const acknowledged = await app.inject({
       method: "PATCH",
@@ -1109,6 +1171,90 @@ describe("workspace productivity API", () => {
         })
       ).statusCode,
     ).toBe(404)
+  })
+
+  it("rejects shared recycle mutations without the dedicated capability", async () => {
+    const { app } = await createTestApp()
+    const memberHeaders = { "x-shadow-account-id": "account-linqiao" }
+    const outsiderHeaders = { "x-shadow-account-id": "account-outsider" }
+
+    for (const headers of [memberHeaders, outsiderHeaders]) {
+      const restore = await app.inject({
+        method: "POST",
+        url: "/v1/teams/north/recycle-bin/team-contact/missing/restore",
+        headers,
+        payload: { expectedRevision: 1 },
+      })
+      const permanentDelete = await app.inject({
+        method: "DELETE",
+        url: "/v1/teams/north/recycle-bin/supplier/missing",
+        headers,
+        payload: { expectedRevision: 1, confirmation: "permanent-delete" },
+      })
+
+      expect(restore.statusCode).toBe(403)
+      expect(permanentDelete.statusCode).toBe(403)
+      expect(restore.json().code).toBe(
+        headers === memberHeaders ? "TEAM_PERMISSION_DENIED" : "TEAM_ACCESS_DENIED",
+      )
+      expect(permanentDelete.json().code).toBe(
+        headers === memberHeaders ? "TEAM_PERMISSION_DENIED" : "TEAM_ACCESS_DENIED",
+      )
+    }
+  })
+
+  it("rejects impossible calendar and task dates while preserving range errors", async () => {
+    const { app } = await createTestApp()
+    const invalidTask = await app.inject({
+      method: "POST",
+      url: "/v1/teams/north/tasks",
+      headers: authHeaders,
+      payload: {
+        title: "非法日期任务",
+        projectId: "winter-coffee",
+        dueDate: "2026-02-31",
+        idempotencyKey: "task-invalid-date",
+      },
+    })
+    const invalidCalendar = await app.inject({
+      method: "POST",
+      url: "/v1/teams/north/calendar-events",
+      headers: authHeaders,
+      payload: {
+        title: "非法日期日程",
+        projectId: "winter-coffee",
+        startsAt: "2026-02-31T08:00:00.000Z",
+        timezone: "Asia/Shanghai",
+        idempotencyKey: "calendar-invalid-date",
+      },
+    })
+    const invalidAudit = await app.inject({
+      method: "GET",
+      url: "/v1/teams/north/audit-logs?from=2026-02-31T00:00:00.000Z",
+      headers: authHeaders,
+    })
+    const invalidRange = await app.inject({
+      method: "POST",
+      url: "/v1/teams/north/calendar-events",
+      headers: authHeaders,
+      payload: {
+        title: "倒序日程",
+        projectId: "winter-coffee",
+        startsAt: "2026-09-02T10:00:00.000Z",
+        endsAt: "2026-09-02T09:00:00.000Z",
+        timezone: "Asia/Shanghai",
+        idempotencyKey: "calendar-invalid-range",
+      },
+    })
+
+    expect(invalidTask.statusCode).toBe(400)
+    expect(invalidTask.json().code).toBe("INVALID_DATE")
+    expect(invalidCalendar.statusCode).toBe(400)
+    expect(invalidCalendar.json().code).toBe("INVALID_DATE")
+    expect(invalidAudit.statusCode).toBe(400)
+    expect(invalidAudit.json().code).toBe("INVALID_DATE")
+    expect(invalidRange.statusCode).toBe(400)
+    expect(invalidRange.json().code).toBe("INVALID_CALENDAR_RANGE")
   })
 
   it("accepts every team-resource recycle kind and rejects unknown kinds", async () => {

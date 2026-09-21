@@ -32,6 +32,7 @@ export const PermissionCapabilitySchema = Type.Union([
   Type.Literal("team.read"),
   Type.Literal("team.write"),
   Type.Literal("team.permissions.manage"),
+  Type.Literal("team.recycle.manage"),
   Type.Literal("asset.write"),
   Type.Literal("portfolio.write"),
   Type.Literal("portfolio.publish"),
@@ -69,10 +70,10 @@ export const PermissionProjectMembershipSchema = Type.Object({
 export const PermissionMemberSchema = Type.Object({
   accountId: Type.String(),
   displayName: Type.String(),
-  role: Type.String(),
+  role: Type.Union([Type.String(), Type.Null()]),
   permissionTemplateId: Type.Union([Type.String(), Type.Null()]),
   permissionTemplateName: Type.Union([Type.String(), Type.Null()]),
-  permissionRevision: Type.Integer({ minimum: 1 }),
+  permissionRevision: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
   projects: Type.Array(PermissionProjectMembershipSchema),
 })
 
@@ -137,8 +138,8 @@ export const WorkspaceContextSchema = Type.Object({
     Type.Object({
       id: Type.String(),
       name: Type.String(),
-      role: Type.String(),
-      memberCount: Type.Integer({ minimum: 1 }),
+      role: Type.Union([Type.String(), Type.Null()]),
+      memberCount: Type.Integer({ minimum: 0 }),
       projects: Type.Array(
         Type.Object({
           id: Type.String(),
@@ -159,8 +160,18 @@ export const AuditLogQuerySchema = Type.Object({
   scope: Type.Optional(Type.Literal("team")),
   action: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
   actor: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
-  from: Type.Optional(Type.String({ format: "date-time" })),
-  to: Type.Optional(Type.String({ format: "date-time" })),
+  from: Type.Optional(
+    Type.String({
+      pattern:
+        "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+    }),
+  ),
+  to: Type.Optional(
+    Type.String({
+      pattern:
+        "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+    }),
+  ),
 })
 
 export const AuditLogSchema = Type.Object({
@@ -219,6 +230,14 @@ export const WorkspaceNotificationSchema = Type.Object({
 export const WorkspaceNotificationListSchema = Type.Object({
   items: Type.Array(WorkspaceNotificationSchema),
   unreadCount: Type.Integer({ minimum: 0 }),
+  total: Type.Integer({ minimum: 0 }),
+  page: Type.Integer({ minimum: 1 }),
+  pageSize: Type.Integer({ minimum: 1, maximum: 100 }),
+})
+
+export const NotificationListQuerySchema = Type.Object({
+  page: Type.Optional(Type.Integer({ minimum: 1 })),
+  pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
 })
 
 export const UpdateNotificationStateBodySchema = Type.Object({
@@ -266,7 +285,9 @@ export const WorkspaceTaskSchema = Type.Object({
 export const CreateWorkspaceTaskBodySchema = Type.Object({
   title: Type.String({ minLength: 1, maxLength: 300 }),
   projectId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
-  dueDate: Type.Optional(Type.Union([Type.String({ format: "date" }), Type.Null()])),
+  dueDate: Type.Optional(
+    Type.Union([Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }), Type.Null()]),
+  ),
   status: Type.Optional(TaskStatusSchema),
   target: Type.Optional(Type.String({ minLength: 1, maxLength: 50 })),
   idempotencyKey: Type.String({ minLength: 8, maxLength: 100 }),
@@ -274,7 +295,9 @@ export const CreateWorkspaceTaskBodySchema = Type.Object({
 
 export const UpdateWorkspaceTaskBodySchema = Type.Object({
   title: Type.Optional(Type.String({ minLength: 1, maxLength: 300 })),
-  dueDate: Type.Optional(Type.Union([Type.String({ format: "date" }), Type.Null()])),
+  dueDate: Type.Optional(
+    Type.Union([Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }), Type.Null()]),
+  ),
   status: Type.Optional(TaskStatusSchema),
   target: Type.Optional(Type.String({ minLength: 1, maxLength: 50 })),
   expectedRevision: Type.Integer({ minimum: 1 }),
@@ -303,8 +326,19 @@ export const CalendarEventSchema = Type.Object({
 export const CreateCalendarEventBodySchema = Type.Object({
   title: Type.String({ minLength: 1, maxLength: 300 }),
   projectId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
-  startsAt: Type.String({ format: "date-time" }),
-  endsAt: Type.Optional(Type.Union([Type.String({ format: "date-time" }), Type.Null()])),
+  startsAt: Type.String({
+    pattern:
+      "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+  }),
+  endsAt: Type.Optional(
+    Type.Union([
+      Type.String({
+        pattern:
+          "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+      }),
+      Type.Null(),
+    ]),
+  ),
   timezone: Type.String({ minLength: 1, maxLength: 80 }),
   allDay: Type.Optional(Type.Boolean()),
   visibility: Type.Optional(
@@ -316,8 +350,21 @@ export const CreateCalendarEventBodySchema = Type.Object({
 
 export const UpdateCalendarEventBodySchema = Type.Object({
   title: Type.Optional(Type.String({ minLength: 1, maxLength: 300 })),
-  startsAt: Type.Optional(Type.String({ format: "date-time" })),
-  endsAt: Type.Optional(Type.Union([Type.String({ format: "date-time" }), Type.Null()])),
+  startsAt: Type.Optional(
+    Type.String({
+      pattern:
+        "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+    }),
+  ),
+  endsAt: Type.Optional(
+    Type.Union([
+      Type.String({
+        pattern:
+          "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+      }),
+      Type.Null(),
+    ]),
+  ),
   timezone: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
   allDay: Type.Optional(Type.Boolean()),
   visibility: Type.Optional(
@@ -388,6 +435,7 @@ export const WorkspaceRecycleItemSchema = Type.Object({
 })
 export const WorkspaceRecycleListSchema = Type.Object({
   items: Type.Array(WorkspaceRecycleItemSchema),
+  canManageShared: Type.Boolean(),
 })
 export const WorkspaceTaskMutationSchema = Type.Object({
   item: WorkspaceTaskSchema,
@@ -492,7 +540,11 @@ export const InvitationListSchema = Type.Object({
 
 export const CreateInvitationBodySchema = Type.Object({
   scope: PermissionTemplateScopeSchema,
-  email: Type.String({ minLength: 3, maxLength: 200 }),
+  email: Type.String({
+    minLength: 3,
+    maxLength: 200,
+    pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+  }),
   projectId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
   permissionTemplateId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
   expiresInDays: Type.Optional(
@@ -507,6 +559,11 @@ export const AcceptInvitationBodySchema = Type.Object({
 
 export const RevokeInvitationBodySchema = Type.Object({
   expectedRevision: Type.Integer({ minimum: 1 }),
+})
+
+export const RotateInvitationTokenBodySchema = Type.Object({
+  expectedRevision: Type.Integer({ minimum: 1 }),
+  idempotencyKey: Type.String({ minLength: 8, maxLength: 100 }),
 })
 
 export const InvitationAcceptanceSchema = Type.Object({
@@ -554,6 +611,8 @@ export type AuditLog = Static<typeof AuditLogSchema>
 export type AuditLogList = Static<typeof AuditLogListSchema>
 export type NotificationKind = Static<typeof NotificationKindSchema>
 export type WorkspaceNotification = Static<typeof WorkspaceNotificationSchema>
+export type WorkspaceNotificationList = Static<typeof WorkspaceNotificationListSchema>
+export type NotificationListQuery = Static<typeof NotificationListQuerySchema>
 export type UpdateNotificationStateBody = Static<typeof UpdateNotificationStateBodySchema>
 export type NotificationPreferences = Static<typeof NotificationPreferencesSchema>
 export type TaskStatus = Static<typeof TaskStatusSchema>
@@ -583,4 +642,5 @@ export type InvitationList = Static<typeof InvitationListSchema>
 export type CreateInvitationBody = Static<typeof CreateInvitationBodySchema>
 export type AcceptInvitationBody = Static<typeof AcceptInvitationBodySchema>
 export type RevokeInvitationBody = Static<typeof RevokeInvitationBodySchema>
+export type RotateInvitationTokenBody = Static<typeof RotateInvitationTokenBodySchema>
 export type InvitationAcceptance = Static<typeof InvitationAcceptanceSchema>

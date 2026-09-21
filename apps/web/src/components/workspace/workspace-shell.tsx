@@ -5,6 +5,7 @@ import type {
   AgentPreviewResponse,
   NotificationPreferences,
   WorkspaceContext,
+  WorkspaceNotification,
 } from "@shadowproducer/contracts"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
@@ -87,6 +88,7 @@ type WorkspaceShellProps = {
   activeView: WorkspaceView
   currentTeam: WorkspaceTeam
   currentProject: WorkspaceProject | null
+  projectOnly: boolean
   accountName: string
   accountEmail: string
   onNavigate: (view: WorkspaceView) => void
@@ -494,10 +496,12 @@ function AppSidebar({
   accountEmail,
   onNavigate,
   onSignOut,
+  projectOnly,
 }: {
   activeView: WorkspaceView
   accountName: string
   accountEmail: string
+  projectOnly: boolean
   onNavigate: (view: WorkspaceView) => void
   onSignOut: () => void
 }) {
@@ -518,7 +522,10 @@ function AppSidebar({
         className="min-h-0 flex-1 overflow-y-auto px-2 py-3"
         aria-label="工作空间导航"
       >
-        {workspaceNavGroups.map((group) => (
+        {(projectOnly
+          ? workspaceNavGroups.filter((group) => group.scope !== "team")
+          : workspaceNavGroups
+        ).map((group) => (
           <div key={group.scope} className="mb-4 last:mb-0">
             <div className="mb-1 px-2 text-xs font-medium text-muted-foreground">
               {group.label}
@@ -570,10 +577,12 @@ function Topbar({
   onProjectChange,
   onOpenProjectView,
   onSignOut,
+  projectOnly,
 }: {
   activeView: WorkspaceView
   currentTeam: WorkspaceTeam
   currentProject: WorkspaceProject | null
+  projectOnly: boolean
   onNavigate: (view: WorkspaceView) => void
   onOpenTeamSelect: () => void
   onProjectChange: (projectId: ProjectId) => void
@@ -595,7 +604,10 @@ function Topbar({
   }, [])
 
   const projects = currentTeam.projects
-  const navItems = workspaceNavGroups.flatMap((group) =>
+  const navGroups = projectOnly
+    ? workspaceNavGroups.filter((group) => group.scope !== "team")
+    : workspaceNavGroups
+  const navItems = navGroups.flatMap((group) =>
     group.items.map((item) => ({ ...item, groupLabel: group.label })),
   )
 
@@ -622,7 +634,7 @@ function Topbar({
                 <Search />
                 全局搜索
               </DropdownMenuItem>
-              {workspaceNavGroups.map((group) => (
+              {navGroups.map((group) => (
                 <div key={group.scope}>
                   <DropdownMenuLabel>{group.label}</DropdownMenuLabel>
                   <NavigationItems
@@ -679,6 +691,7 @@ function Topbar({
           <NotificationPopover
             teamId={currentTeam.id}
             projects={currentTeam.projects}
+            projectOnly={projectOnly}
             onNavigate={onNavigate}
             onOpenProjectView={onOpenProjectView}
           />
@@ -772,29 +785,48 @@ function Topbar({
 function NotificationPopover({
   teamId,
   projects,
+  projectOnly,
   onNavigate,
   onOpenProjectView,
 }: {
   teamId: string
   projects: WorkspaceProject[]
+  projectOnly: boolean
   onNavigate: (view: WorkspaceView) => void
   onOpenProjectView: (projectId: ProjectId, view: WorkspaceView) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [notificationPage, setNotificationPage] = useState(1)
+  const [notificationItems, setNotificationItems] = useState<WorkspaceNotification[]>([])
   const queryClient = useQueryClient()
   const notificationsKey = ["workspace-notifications", teamId] as const
   const preferencesKey = ["notification-preferences", teamId] as const
   const notificationsQuery = useQuery({
-    queryKey: notificationsKey,
-    queryFn: () => workspaceApi.listNotifications(teamId),
+    queryKey: [...notificationsKey, notificationPage] as const,
+    queryFn: () =>
+      workspaceApi.listNotifications(teamId, { page: notificationPage, pageSize: 50 }),
   })
   const preferencesQuery = useQuery({
     queryKey: preferencesKey,
     queryFn: () => workspaceApi.getNotificationPreferences(teamId),
     enabled: open,
   })
-  const refreshNotifications = () =>
-    queryClient.invalidateQueries({ queryKey: notificationsKey })
+  const refreshNotifications = () => {
+    setNotificationPage(1)
+    setNotificationItems([])
+    return queryClient.invalidateQueries({ queryKey: notificationsKey })
+  }
+  useEffect(() => {
+    if (!notificationsQuery.data) return
+    setNotificationItems((current) => {
+      if (notificationPage === 1) return notificationsQuery.data.items
+      const existing = new Set(current.map((item) => item.id))
+      return [
+        ...current,
+        ...notificationsQuery.data.items.filter((item) => !existing.has(item.id)),
+      ]
+    })
+  }, [notificationPage, notificationsQuery.data])
   const stateMutation = useMutation({
     mutationFn: ({ id, action }: { id: string; action: "read" | "acknowledge" }) =>
       workspaceApi.updateNotification(teamId, id, { action }),
@@ -820,6 +852,12 @@ function NotificationPopover({
     projectId: string | null
   }) => {
     stateMutation.mutate({ id: notification.id, action: "read" })
+    const project = projects.find((candidate) => candidate.id === notification.projectId)
+    if (projectOnly) {
+      if (project) onOpenProjectView(project.id, "project")
+      setOpen(false)
+      return
+    }
     if (
       notification.kind === "team_permission_assigned" ||
       notification.kind === "project_permission_assigned"
@@ -849,16 +887,18 @@ function NotificationPopover({
       notification.kind === "review_comment_replied" ||
       notification.kind === "review_file_approved"
     ) {
-      const project = projects.find(
+      const reviewProject = projects.find(
         (candidate) => candidate.id === notification.projectId,
       )
-      if (project) onOpenProjectView(project.id, "reviews")
+      if (reviewProject) onOpenProjectView(reviewProject.id, "reviews")
       else onNavigate("reviews")
       setOpen(false)
       return
     }
-    const project = projects.find((candidate) => candidate.id === notification.projectId)
-    if (project) onOpenProjectView(project.id, "schedule")
+    const scheduleProject = projects.find(
+      (candidate) => candidate.id === notification.projectId,
+    )
+    if (scheduleProject) onOpenProjectView(scheduleProject.id, "schedule")
     else onNavigate("schedule")
     setOpen(false)
   }
@@ -874,7 +914,11 @@ function NotificationPopover({
       open={open}
       onOpenChange={(nextOpen) => {
         setOpen(nextOpen)
-        if (nextOpen) void notificationsQuery.refetch()
+        if (nextOpen) {
+          setNotificationPage(1)
+          setNotificationItems([])
+          void notificationsQuery.refetch()
+        }
       }}
     >
       <PopoverTrigger asChild>
@@ -981,14 +1025,14 @@ function NotificationPopover({
           </DropdownMenu>
         </div>
         <div className="min-h-48 max-h-[min(420px,calc(100vh-96px))] overflow-y-auto">
-          {notificationsQuery.isPending ? (
+          {notificationsQuery.isPending && notificationItems.length === 0 ? (
             <div className="grid min-h-48 place-items-center text-xs text-muted-foreground">
               <span className="flex items-center gap-2">
                 <LoaderCircle className="size-4 animate-spin" />
                 正在加载通知
               </span>
             </div>
-          ) : notificationsQuery.isError ? (
+          ) : notificationsQuery.isError && notificationItems.length === 0 ? (
             <div className="grid min-h-48 place-items-center gap-2 px-4 text-center text-xs text-muted-foreground">
               <span>通知暂时无法加载</span>
               <Button
@@ -1001,13 +1045,13 @@ function NotificationPopover({
                 重试
               </Button>
             </div>
-          ) : notificationsQuery.data.items.length === 0 ? (
+          ) : notificationItems.length === 0 ? (
             <div className="grid min-h-48 place-items-center px-4 text-center text-xs text-muted-foreground">
               暂无通知
             </div>
           ) : (
             <div className="divide-y divide-border">
-              {notificationsQuery.data.items.map((notification) => (
+              {notificationItems.map((notification) => (
                 <div
                   key={notification.id}
                   className={cn(
@@ -1068,6 +1112,22 @@ function NotificationPopover({
                   </div>
                 </div>
               ))}
+              {notificationPage * 50 < (notificationsQuery.data?.total ?? 0) ? (
+                <div className="border-t border-border p-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-11 w-full text-xs"
+                    disabled={notificationsQuery.isFetching}
+                    onClick={() => setNotificationPage((page) => page + 1)}
+                  >
+                    {notificationsQuery.isFetching ? (
+                      <LoaderCircle className="animate-spin" />
+                    ) : null}
+                    加载更多
+                  </Button>
+                </div>
+              ) : null}
             </div>
           )}
         </div>
@@ -1624,6 +1684,7 @@ export function WorkspaceShell({
   activeView,
   currentTeam,
   currentProject,
+  projectOnly,
   accountName,
   accountEmail,
   onNavigate,
@@ -1635,11 +1696,12 @@ export function WorkspaceShell({
 }: WorkspaceShellProps) {
   return (
     <Sheet>
-      <div className="grid h-svh grid-cols-1 overflow-hidden bg-workspace md:grid-cols-[216px_minmax(0,1fr)]">
+      <div className="grid h-svh min-w-0 flex-1 grid-cols-1 overflow-hidden bg-workspace md:grid-cols-[216px_minmax(0,1fr)]">
         <AppSidebar
           activeView={activeView}
           accountName={accountName}
           accountEmail={accountEmail}
+          projectOnly={projectOnly}
           onNavigate={onNavigate}
           onSignOut={onSignOut}
         />
@@ -1648,6 +1710,7 @@ export function WorkspaceShell({
             activeView={activeView}
             currentTeam={currentTeam}
             currentProject={currentProject}
+            projectOnly={projectOnly}
             onNavigate={onNavigate}
             onOpenTeamSelect={onOpenTeamSelect}
             onProjectChange={onProjectChange}

@@ -27,6 +27,7 @@ import {
   Dialog,
   DialogClose,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -58,6 +59,7 @@ import {
   isOnboardingFeatureUnavailableError,
   onboardingErrorMessage,
   type TeamInvitationStatus,
+  validateInvitationEmail,
 } from "@/lib/onboarding"
 import { cn } from "@/lib/utils"
 
@@ -74,6 +76,11 @@ const capabilityGroups: Record<
       detail: "创建模板并调整成员权限",
     },
     { capability: "asset.write", label: "管理资源", detail: "上传、整理与归档资源" },
+    {
+      capability: "team.recycle.manage",
+      label: "管理回收站",
+      detail: "恢复或永久删除团队共享资源",
+    },
     {
       capability: "portfolio.write",
       label: "编辑作品集",
@@ -405,7 +412,7 @@ export function TeamPermissions({ teamId }: { teamId: TeamId }) {
                         {member.displayName}
                       </div>
                       <div className="mt-1 truncate text-xs text-muted-foreground">
-                        {member.role} · {member.accountId}
+                        {member.role ?? "仅项目成员"} · {member.accountId}
                         {member.accountId === permissionsQuery.data?.currentAccountId
                           ? " · 当前用户"
                           : null}
@@ -415,24 +422,31 @@ export function TeamPermissions({ teamId }: { teamId: TeamId }) {
                       <div className="mb-1 text-xs text-muted-foreground lg:hidden">
                         团队权限
                       </div>
-                      <TemplateSelect
-                        label={`调整 ${member.displayName} 的团队权限`}
-                        templates={teamTemplates}
-                        value={member.permissionTemplateId}
-                        disabled={
-                          !canManage ||
-                          member.accountId === permissionsQuery.data?.currentAccountId ||
-                          assignmentMutation.isPending
-                        }
-                        onChange={(templateId) =>
-                          assignmentMutation.mutate({
-                            scope: "team",
-                            accountId: member.accountId,
-                            templateId,
-                            expectedRevision: member.permissionRevision,
-                          })
-                        }
-                      />
+                      {member.role === null ? (
+                        <div className="flex min-h-11 items-center rounded-md border border-dashed border-border px-3 text-xs text-muted-foreground">
+                          仅项目成员，无团队权限
+                        </div>
+                      ) : (
+                        <TemplateSelect
+                          label={`调整 ${member.displayName} 的团队权限`}
+                          templates={teamTemplates}
+                          value={member.permissionTemplateId}
+                          disabled={
+                            !canManage ||
+                            member.accountId ===
+                              permissionsQuery.data?.currentAccountId ||
+                            assignmentMutation.isPending
+                          }
+                          onChange={(templateId) =>
+                            assignmentMutation.mutate({
+                              scope: "team",
+                              accountId: member.accountId,
+                              templateId,
+                              expectedRevision: member.permissionRevision ?? 0,
+                            })
+                          }
+                        />
+                      )}
                     </div>
                     <div className="min-w-0">
                       <div className="mb-1 text-xs text-muted-foreground lg:hidden">
@@ -698,6 +712,7 @@ function InvitationsPanel({
   })
   const [createOpen, setCreateOpen] = useState(false)
   const [inviteEmail, setInviteEmail] = useState("")
+  const [inviteEmailError, setInviteEmailError] = useState("")
   const [templateId, setTemplateId] = useState("")
   const [expiresInDays, setExpiresInDays] = useState<number>(7)
   const [copiedId, setCopiedId] = useState("")
@@ -729,13 +744,14 @@ function InvitationsPanel({
       setCopiedId(invitation.id)
       setCopyError("")
     } catch {
-      setCopyError("浏览器未允许复制，请从列表中查看链接")
+      setCopyError("浏览器未允许复制，请手动选中上方输入框中的链接并复制")
     }
   }
 
   const openCreate = () => {
     setLastCreated(null)
     setCopyError("")
+    setInviteEmailError("")
     setInviteEmail("")
     setTemplateId(teamTemplates[0]?.id ?? "")
     setExpiresInDays(7)
@@ -743,15 +759,19 @@ function InvitationsPanel({
   }
 
   const createMutation = useMutation({
-    mutationFn: () =>
-      onboardingApi.createInvitation(teamId, {
+    mutationFn: () => {
+      const validation = validateInvitationEmail(inviteEmail)
+      if (validation) throw new Error(validation)
+      return onboardingApi.createInvitation(teamId, {
         scope: "team",
         email: inviteEmail.trim(),
         permissionTemplateId: templateId || undefined,
         expiresInDays: expiresInDays as 7 | 30 | 90,
         idempotencyKey: crypto.randomUUID(),
-      }),
+      })
+    },
     onSuccess: async ({ item }) => {
+      setInviteEmailError("")
       setLastCreated(item)
       await refresh()
       await copyLink(item)
@@ -762,10 +782,32 @@ function InvitationsPanel({
       onboardingApi.revokeInvitation(teamId, input.invitationId, input.revision),
     onSuccess: refresh,
   })
+  const rotateMutation = useMutation({
+    mutationFn: (input: { invitationId: string; revision: number }) =>
+      onboardingApi.rotateInvitationToken(teamId, input.invitationId, {
+        expectedRevision: input.revision,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    onSuccess: async ({ item }) => {
+      setLastCreated(item)
+      setCreateOpen(true)
+      await refresh()
+      await copyLink(item)
+    },
+  })
 
   const featureUnavailable = listQuery.isError
     ? isOnboardingFeatureUnavailableError(listQuery.error)
     : false
+
+  const submitInvitation = () => {
+    const validation = validateInvitationEmail(inviteEmail)
+    setInviteEmailError(validation ?? "")
+    if (validation || createMutation.isPending) return
+    createMutation.mutate()
+  }
+
+  const hasUnconfirmedToken = Boolean(lastCreated?.token)
 
   return (
     <PageBody scroll="y">
@@ -833,21 +875,38 @@ function InvitationsPanel({
                 </div>
                 <div className="flex flex-none items-center gap-2">
                   {invitation.status === "pending" ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={revokeMutation.isPending}
-                      onClick={() =>
-                        revokeMutation.mutate({
-                          invitationId: invitation.id,
-                          revision: invitation.revision,
-                        })
-                      }
-                    >
-                      <Link2Off />
-                      撤销
-                    </Button>
+                    <>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={revokeMutation.isPending || rotateMutation.isPending}
+                        onClick={() =>
+                          rotateMutation.mutate({
+                            invitationId: invitation.id,
+                            revision: invitation.revision,
+                          })
+                        }
+                      >
+                        <RefreshCw />
+                        重新生成链接
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={revokeMutation.isPending || rotateMutation.isPending}
+                        onClick={() =>
+                          revokeMutation.mutate({
+                            invitationId: invitation.id,
+                            revision: invitation.revision,
+                          })
+                        }
+                      >
+                        <Link2Off />
+                        撤销
+                      </Button>
+                    </>
                   ) : null}
                 </div>
               </div>
@@ -870,17 +929,38 @@ function InvitationsPanel({
           {`撤销失败：${onboardingErrorMessage(revokeMutation.error)}`}
         </div>
       ) : null}
+      {rotateMutation.isError ? (
+        <div
+          role="alert"
+          className="border-t border-destructive/25 bg-destructive/5 px-4 py-2 text-xs text-destructive"
+        >
+          {`重新生成失败：${onboardingErrorMessage(rotateMutation.error)}`}
+        </div>
+      ) : null}
 
       <Dialog
         open={createOpen}
         onOpenChange={(open) => {
+          if (!open && hasUnconfirmedToken) return
           setCreateOpen(open)
           if (open) openCreate()
         }}
       >
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent
+          className="sm:max-w-lg"
+          showCloseButton={!hasUnconfirmedToken}
+          onEscapeKeyDown={(event) => {
+            if (hasUnconfirmedToken) event.preventDefault()
+          }}
+          onPointerDownOutside={(event) => {
+            if (hasUnconfirmedToken) event.preventDefault()
+          }}
+        >
           <DialogHeader>
             <DialogTitle>创建邀请链接</DialogTitle>
+            <DialogDescription>
+              链接只在创建完成后显示一次，请在点击“完成”前复制并妥善发送。
+            </DialogDescription>
           </DialogHeader>
           {lastCreated ? (
             <div className="space-y-4">
@@ -908,9 +988,9 @@ function InvitationsPanel({
                   {copiedId === lastCreated.id ? <Check /> : <Copy />}
                   {copiedId === lastCreated.id ? "已复制" : "复制链接"}
                 </Button>
-                <DialogClose asChild>
-                  <Button type="button">完成</Button>
-                </DialogClose>
+                <Button type="button" onClick={() => setCreateOpen(false)}>
+                  完成
+                </Button>
               </div>
             </div>
           ) : (
@@ -923,10 +1003,26 @@ function InvitationsPanel({
                   id="invitation-email"
                   type="email"
                   value={inviteEmail}
-                  onChange={(event) => setInviteEmail(event.target.value)}
+                  aria-invalid={inviteEmailError ? true : undefined}
+                  aria-describedby={
+                    inviteEmailError ? "invitation-email-error" : undefined
+                  }
+                  onChange={(event) => {
+                    setInviteEmail(event.target.value)
+                    if (inviteEmailError) setInviteEmailError("")
+                  }}
                   placeholder="name@example.com"
                   required
                 />
+                {inviteEmailError ? (
+                  <span
+                    id="invitation-email-error"
+                    role="alert"
+                    className="text-xs text-destructive"
+                  >
+                    {inviteEmailError}
+                  </span>
+                ) : null}
               </div>
               <div className="grid gap-1.5">
                 <span className="text-xs font-medium">受邀人权限模板</span>
@@ -974,8 +1070,12 @@ function InvitationsPanel({
                 </DialogClose>
                 <Button
                   type="button"
-                  disabled={createMutation.isPending || !inviteEmail.trim()}
-                  onClick={() => createMutation.mutate()}
+                  disabled={
+                    createMutation.isPending ||
+                    Boolean(inviteEmailError) ||
+                    !inviteEmail.trim()
+                  }
+                  onClick={submitInvitation}
                 >
                   {createMutation.isPending ? "正在创建" : "创建链接"}
                 </Button>

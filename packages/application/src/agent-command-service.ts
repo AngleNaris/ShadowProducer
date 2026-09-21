@@ -18,6 +18,7 @@ import type {
 import type { AnalysisService } from "./analysis-service"
 import type { AssetService } from "./asset-service"
 import type { ContactService } from "./contact-service"
+import { isValidIsoCalendarDate } from "./date-validation"
 import type { PortfolioService } from "./portfolio-service"
 import type { ProductionService } from "./production-service"
 import type { ReviewLinkService } from "./review-link-service"
@@ -882,6 +883,9 @@ export class AgentCommandService {
             : "未找到唯一匹配的日程，请明确日程标题",
           400,
         )
+      }
+      if (!isValidIsoCalendarDate(body.startsAt)) {
+        throw new AppError("INVALID_DATE", "日期时间无效", 400)
       }
       const startsAt = new Date(body.startsAt)
       const endsAt = event.endsAt
@@ -2589,7 +2593,7 @@ export class AgentCommandService {
 
   private async assertTeamScope(actorId: string, teamId: string) {
     const context = await this.workspaceService.getContext(actorId)
-    if (!context.teams.some((team) => team.id === teamId)) {
+    if (!context.teams.some((team) => team.id === teamId && team.role !== null)) {
       throw new AppError("TEAM_ACCESS_DENIED", "无权访问当前团队", 403)
     }
   }

@@ -4,6 +4,7 @@ import { Pool } from "pg"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import { createDatabase, defaultDatabaseUrl } from "./database"
+import { listProjectMemberAccesses } from "./postgres-access"
 import { PostgresWorkspaceRepository } from "./postgres-workspace-repository"
 
 const databaseUrl = process.env.TEST_DATABASE_URL ?? defaultDatabaseUrl
@@ -16,16 +17,19 @@ const runId = `pg-onboarding-${process.pid}-${Date.now().toString(36)}`
 const ownerId = `${runId}-owner`
 const inviteeId = `${runId}-invitee`
 const matchingInviteeId = `${runId}-matching-invitee`
+const concurrentAccepteeId = `${runId}-concurrent-acceptee`
 const outsiderId = `${runId}-outsider`
 const viewerId = `${runId}-viewer`
 const ownerEmail = `${runId}-owner@shadowproducer.local`
 const inviteeEmail = `${runId}-invitee@shadowproducer.local`
 const matchingInviteeEmail = `${runId}-matching@shadowproducer.local`
+const concurrentAccepteeEmail = `${runId}-concurrent-acceptee@shadowproducer.local`
 const outsiderEmail = `${runId}-outsider@shadowproducer.local`
 
 let teamId: string
 let projectId: string
 let teamInvitationToken: string
+let projectInvitationToken: string
 
 function sha256(value: string) {
   return createHash("sha256").update(value).digest("hex")
@@ -42,6 +46,11 @@ beforeAll(async () => {
         display_name: "林乔",
         email: matchingInviteeEmail,
       },
+      {
+        id: concurrentAccepteeId,
+        display_name: "并发受邀成员",
+        email: concurrentAccepteeEmail,
+      },
       { id: outsiderId, display_name: "外部协作者", email: outsiderEmail },
       { id: viewerId, display_name: "只读成员", email: null },
     ])
@@ -57,6 +66,7 @@ afterAll(async () => {
           ownerId,
           inviteeId,
           matchingInviteeId,
+          concurrentAccepteeId,
           outsiderId,
           viewerId,
         ]),
@@ -76,13 +86,21 @@ afterAll(async () => {
       ownerId,
       inviteeId,
       matchingInviteeId,
+      concurrentAccepteeId,
       outsiderId,
       viewerId,
     ])
     .execute()
   await database
     .deleteFrom("accounts")
-    .where("id", "in", [ownerId, inviteeId, outsiderId, viewerId])
+    .where("id", "in", [
+      ownerId,
+      inviteeId,
+      matchingInviteeId,
+      concurrentAccepteeId,
+      outsiderId,
+      viewerId,
+    ])
     .execute()
   await database.destroy()
 })
@@ -129,6 +147,16 @@ describe("Postgres workspace onboarding", () => {
       permission_template_id: `${teamId}:team-admin`,
       permission_revision: 1,
     })
+    const context = await service.getContext(ownerId)
+    expect(context.teams).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: teamId,
+          role: "owner",
+          memberCount: 1,
+        }),
+      ]),
+    )
 
     const replay = await service.createTeam({
       actorId: ownerId,
@@ -288,6 +316,30 @@ describe("Postgres workspace onboarding", () => {
         idempotencyKey: `${runId}-invite-team-duplicate`,
       }),
     ).rejects.toMatchObject({ code: "INVITATION_PENDING_EXISTS", statusCode: 409 })
+
+    const concurrentEmail = `${runId}-concurrent@shadowproducer.local`
+    const concurrent = await Promise.allSettled([
+      service.createInvitation({
+        actorId: ownerId,
+        teamId,
+        scope: "team",
+        email: concurrentEmail,
+        idempotencyKey: `${runId}-invite-concurrent-a`,
+      }),
+      service.createInvitation({
+        actorId: ownerId,
+        teamId,
+        scope: "team",
+        email: concurrentEmail,
+        idempotencyKey: `${runId}-invite-concurrent-b`,
+      }),
+    ])
+    expect(concurrent.filter((result) => result.status === "fulfilled")).toHaveLength(1)
+    expect(concurrent.filter((result) => result.status === "rejected")).toHaveLength(1)
+    expect(concurrent.find((result) => result.status === "rejected")).toMatchObject({
+      status: "rejected",
+      reason: { code: "INVITATION_PENDING_EXISTS", statusCode: 409 },
+    })
     await expect(
       service.createInvitation({
         actorId: ownerId,
@@ -345,10 +397,214 @@ describe("Postgres workspace onboarding", () => {
       scope: "team",
       status: "pending",
     })
-    await expect(service.getInvitationSummary(`unknown-${token}`)).rejects.toMatchObject({
+    const rotated = await service.rotateInvitationToken({
+      actorId: ownerId,
+      teamId,
+      itemId: created.item.id,
+      expectedRevision: 1,
+      idempotencyKey: `${runId}-invite-rotate-1`,
+    })
+    expect(rotated.replayed).toBe(false)
+    expect(rotated.item).toMatchObject({
+      id: created.item.id,
+      revision: 2,
+      status: "pending",
+    })
+    expect(rotated.item.token).toEqual(expect.any(String))
+    const rotatedToken = rotated.item.token as string
+    expect(rotatedToken).not.toBe(token)
+    teamInvitationToken = rotatedToken
+    await expect(service.getInvitationSummary(token)).rejects.toMatchObject({
       code: "INVITATION_NOT_FOUND",
       statusCode: 404,
     })
+    await expect(
+      service.acceptInvitation({
+        actorId: matchingInviteeId,
+        token,
+        idempotencyKey: `${runId}-accept-old-rotated-token`,
+      }),
+    ).rejects.toMatchObject({ code: "INVITATION_NOT_FOUND", statusCode: 404 })
+    await expect(service.getInvitationSummary(rotatedToken)).resolves.toMatchObject({
+      item: { id: created.item.id, status: "pending", revision: 2 },
+    })
+    const rotatedRow = await database
+      .selectFrom("onboarding_invitations")
+      .selectAll()
+      .where("id", "=", created.item.id)
+      .executeTakeFirstOrThrow()
+    expect(rotatedRow.token_hash).toBe(sha256(rotatedToken))
+    expect(JSON.stringify(rotatedRow)).not.toContain(rotatedToken)
+    const rotatedReceipt = await database
+      .selectFrom("command_receipts")
+      .select("response")
+      .where("actor_account_id", "=", ownerId)
+      .where("domain", "=", `invitation.rotate-token:${teamId}`)
+      .where("idempotency_key", "=", `${runId}-invite-rotate-1`)
+      .executeTakeFirstOrThrow()
+    expect(JSON.stringify(rotatedReceipt.response)).not.toContain(rotatedToken)
+    const rotatedReplay = await service.rotateInvitationToken({
+      actorId: ownerId,
+      teamId,
+      itemId: created.item.id,
+      expectedRevision: 1,
+      idempotencyKey: `${runId}-invite-rotate-1`,
+    })
+    expect(rotatedReplay).toMatchObject({
+      replayed: true,
+      item: { id: created.item.id, revision: 2 },
+    })
+    expect(rotatedReplay.item.token).toBeUndefined()
+    await expect(
+      service.rotateInvitationToken({
+        actorId: ownerId,
+        teamId,
+        itemId: created.item.id,
+        expectedRevision: 1,
+        idempotencyKey: `${runId}-invite-rotate-stale`,
+      }),
+    ).rejects.toMatchObject({ code: "RESOURCE_CONFLICT", statusCode: 409 })
+  })
+
+  it("replays one concurrent invitation creation with the same idempotency key", async () => {
+    const email = `${runId}-same-key-create@shadowproducer.local`
+    const idempotencyKey = `${runId}-invite-same-key`
+    const command = {
+      actorId: ownerId,
+      teamId,
+      scope: "team" as const,
+      email,
+      idempotencyKey,
+    }
+    const results = await Promise.all([
+      service.createInvitation(command),
+      service.createInvitation(command),
+    ])
+
+    expect(results.map((result) => result.replayed).sort()).toEqual([false, true])
+    expect(results[0].item.id).toBe(results[1].item.id)
+    expect(results.filter((result) => result.item.token).length).toBe(1)
+
+    const invitations = await database
+      .selectFrom("onboarding_invitations")
+      .select(["id", "email"])
+      .where("team_id", "=", teamId)
+      .where("email", "=", email)
+      .execute()
+    expect(invitations).toHaveLength(1)
+    expect(invitations[0]?.id).toBe(results[0].item.id)
+
+    const receipts = await database
+      .selectFrom("command_receipts")
+      .select(["idempotency_key"])
+      .where("actor_account_id", "=", ownerId)
+      .where("domain", "=", `invitation.create:${teamId}`)
+      .where("idempotency_key", "=", idempotencyKey)
+      .execute()
+    expect(receipts).toHaveLength(1)
+
+    const audits = await database
+      .selectFrom("audit_logs")
+      .select(["action", "subject_id"])
+      .where("team_id", "=", teamId)
+      .where("action", "=", "invitation.created")
+      .where("subject_id", "=", results[0].item.id)
+      .execute()
+    expect(audits).toEqual([
+      { action: "invitation.created", subject_id: results[0].item.id },
+    ])
+
+    await expect(
+      service.createInvitation({
+        ...command,
+        email: `${runId}-different-request@shadowproducer.local`,
+      }),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED", statusCode: 409 })
+  })
+
+  it("replays one concurrent invitation acceptance with the same idempotency key", async () => {
+    const created = await service.createInvitation({
+      actorId: ownerId,
+      teamId,
+      scope: "team",
+      email: concurrentAccepteeEmail,
+      idempotencyKey: `${runId}-invite-concurrent-acceptance`,
+    })
+    const token = created.item.token as string
+    const idempotencyKey = `${runId}-accept-same-key`
+    const command = {
+      actorId: concurrentAccepteeId,
+      token,
+      idempotencyKey,
+    }
+    const results = await Promise.all([
+      service.acceptInvitation(command),
+      service.acceptInvitation(command),
+    ])
+
+    expect(results.map((result) => result.replayed).sort()).toEqual([false, true])
+    expect(results[0].item).toEqual(results[1].item)
+
+    const invitation = await database
+      .selectFrom("onboarding_invitations")
+      .select(["status", "accepted_account_id", "revision"])
+      .where("id", "=", created.item.id)
+      .executeTakeFirstOrThrow()
+    expect(invitation).toMatchObject({
+      status: "accepted",
+      accepted_account_id: concurrentAccepteeId,
+      revision: 2,
+    })
+
+    expect(
+      await database
+        .selectFrom("team_memberships")
+        .select("account_id")
+        .where("team_id", "=", teamId)
+        .where("account_id", "=", concurrentAccepteeId)
+        .execute(),
+    ).toEqual([{ account_id: concurrentAccepteeId }])
+
+    expect(
+      await database
+        .selectFrom("notifications")
+        .select(["subject_id", "dedup_key"])
+        .where("recipient_account_id", "=", ownerId)
+        .where("subject_id", "=", created.item.id)
+        .execute(),
+    ).toEqual([
+      {
+        subject_id: created.item.id,
+        dedup_key: `invitation-accepted:${created.item.id}`,
+      },
+    ])
+
+    expect(
+      await database
+        .selectFrom("audit_logs")
+        .select(["action", "subject_id"])
+        .where("actor_account_id", "=", concurrentAccepteeId)
+        .where("action", "=", "invitation.accepted")
+        .where("subject_id", "=", created.item.id)
+        .execute(),
+    ).toEqual([{ action: "invitation.accepted", subject_id: created.item.id }])
+
+    expect(
+      await database
+        .selectFrom("command_receipts")
+        .select(["idempotency_key"])
+        .where("actor_account_id", "=", concurrentAccepteeId)
+        .where("domain", "=", "invitation.accept")
+        .where("idempotency_key", "=", idempotencyKey)
+        .execute(),
+    ).toHaveLength(1)
+
+    await expect(
+      service.acceptInvitation({
+        ...command,
+        token: `${token}different`,
+      }),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED", statusCode: 409 })
   })
 
   it("accepts team invitations only for matching emails and notifies the inviter", async () => {
@@ -401,7 +657,7 @@ describe("Postgres workspace onboarding", () => {
     expect(invitation).toMatchObject({
       status: "accepted",
       accepted_account_id: matchingInviteeId,
-      revision: 2,
+      revision: 3,
     })
     expect(invitation.accepted_at).toBeInstanceOf(Date)
 
@@ -466,6 +722,188 @@ describe("Postgres workspace onboarding", () => {
         idempotencyKey: `${runId}-accept-matching-again`,
       }),
     ).rejects.toMatchObject({ code: "INVITATION_ALREADY_ACCEPTED", statusCode: 410 })
+  })
+
+  it("accepts project invitations without creating team membership and keeps project-only data isolated", async () => {
+    const created = await service.createInvitation({
+      actorId: ownerId,
+      teamId,
+      scope: "project",
+      projectId,
+      email: outsiderEmail,
+      idempotencyKey: `${runId}-invite-project-1`,
+    })
+    projectInvitationToken = created.item.token as string
+    expect(created.item).toMatchObject({
+      scope: "project",
+      teamId,
+      projectId,
+      projectName: "霓虹旅馆",
+      email: outsiderEmail,
+      permissionTemplateId: `${teamId}:project-contributor`,
+    })
+
+    const accepted = await service.acceptInvitation({
+      actorId: outsiderId,
+      token: projectInvitationToken,
+      idempotencyKey: `${runId}-accept-project-1`,
+    })
+    expect(accepted.item).toMatchObject({
+      scope: "project",
+      teamId,
+      projectId,
+      projectName: "霓虹旅馆",
+      permissionTemplateId: `${teamId}:project-contributor`,
+    })
+
+    expect(
+      await database
+        .selectFrom("team_memberships")
+        .select("account_id")
+        .where("team_id", "=", teamId)
+        .where("account_id", "=", outsiderId)
+        .execute(),
+    ).toEqual([])
+    expect(
+      await database
+        .selectFrom("project_memberships")
+        .select(["role", "permission_template_id", "permission_revision"])
+        .where("project_id", "=", projectId)
+        .where("account_id", "=", outsiderId)
+        .executeTakeFirstOrThrow(),
+    ).toEqual({
+      role: "member",
+      permission_template_id: `${teamId}:project-contributor`,
+      permission_revision: 1,
+    })
+
+    await expect(repository.getTeamAccess(outsiderId, teamId)).resolves.toBeNull()
+    await expect(
+      repository.getProjectAccess(outsiderId, teamId, projectId),
+    ).resolves.toMatchObject({
+      canRead: true,
+      canWrite: true,
+      capabilities: expect.arrayContaining(["project.read", "project.write"]),
+    })
+    await expect(service.listTasks(outsiderId, teamId)).rejects.toMatchObject({
+      code: "TEAM_ACCESS_DENIED",
+      statusCode: 403,
+    })
+
+    const context = await service.getContext(outsiderId)
+    expect(context.teams).toEqual([
+      expect.objectContaining({
+        id: teamId,
+        name: "北岸影像二部",
+        role: null,
+        memberCount: 0,
+        projects: [expect.objectContaining({ id: projectId, name: "霓虹旅馆" })],
+      }),
+    ])
+
+    await database
+      .insertInto("notifications")
+      .values([
+        {
+          id: `${runId}-project-only-notification`,
+          recipient_account_id: outsiderId,
+          source_actor_account_id: ownerId,
+          team_id: teamId,
+          project_id: projectId,
+          kind: "project_invitation_accepted",
+          subject_id: `${runId}-project-only-subject`,
+          dedup_key: `${runId}-project-only-notification`,
+          title: "项目邀请已接受",
+          body: "项目通知",
+          metadata: JSON.stringify({ scope: "project" }),
+          read_at: null,
+          acknowledged_at: null,
+        },
+        {
+          id: `${runId}-team-only-notification`,
+          recipient_account_id: outsiderId,
+          source_actor_account_id: ownerId,
+          team_id: teamId,
+          project_id: null,
+          kind: "team_invitation_accepted",
+          subject_id: `${runId}-team-only-subject`,
+          dedup_key: `${runId}-team-only-notification`,
+          title: "团队通知不应可见",
+          body: "团队级通知",
+          metadata: JSON.stringify({ scope: "team" }),
+          read_at: null,
+          acknowledged_at: null,
+        },
+      ])
+      .execute()
+    const notifications = await service.listNotifications(outsiderId, teamId)
+    expect(notifications.items).toEqual([
+      expect.objectContaining({
+        id: `${runId}-project-only-notification`,
+        projectId,
+      }),
+    ])
+    await expect(
+      service.listAuditLogs(outsiderId, teamId, {
+        scope: "team",
+        page: 1,
+        pageSize: 25,
+      }),
+    ).resolves.toMatchObject({ items: [], total: 0 })
+    await expect(
+      service.listAuditLogs(outsiderId, teamId, {
+        projectId,
+        page: 1,
+        pageSize: 25,
+      }),
+    ).resolves.toMatchObject({
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          projectId,
+          action: "invitation.accepted",
+        }),
+      ]),
+    })
+
+    const permissionWorkspace = await service.listPermissionWorkspace(ownerId, teamId)
+    expect(permissionWorkspace.members).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          accountId: outsiderId,
+          role: null,
+          permissionTemplateId: null,
+          permissionRevision: null,
+          projects: [
+            expect.objectContaining({
+              projectId,
+              permissionTemplateId: `${teamId}:project-contributor`,
+            }),
+          ],
+        }),
+      ]),
+    )
+    await expect(
+      service.assignTeamPermissionTemplate({
+        actorId: ownerId,
+        teamId,
+        accountId: outsiderId,
+        templateId: `${teamId}:team-viewer`,
+        expectedRevision: 0,
+      }),
+    ).rejects.toMatchObject({ code: "RESOURCE_NOT_FOUND", statusCode: 404 })
+
+    const projectMembers = await listProjectMemberAccesses(database, projectId)
+    expect(projectMembers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          accountId: outsiderId,
+          access: expect.objectContaining({
+            canRead: true,
+            capabilities: expect.arrayContaining(["project.read"]),
+          }),
+        }),
+      ]),
+    )
   })
 
   it("rejects existing members, revoked invitations, expired invitations and stale revocations", async () => {
@@ -543,7 +981,7 @@ describe("Postgres workspace onboarding", () => {
         itemId: revokedInvitation.item.id,
         expectedRevision: 1,
       }),
-    ).rejects.toMatchObject({ code: "RESOURCE_CONFLICT", statusCode: 409 })
+    ).rejects.toMatchObject({ code: "INVITATION_REVOKED", statusCode: 410 })
 
     const expiredInvitation = await service.createInvitation({
       actorId: ownerId,

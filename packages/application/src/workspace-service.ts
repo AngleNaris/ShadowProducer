@@ -22,6 +22,7 @@ import type {
   PermissionTemplate,
   PermissionTemplateScope,
   PermissionWorkspace,
+  RotateInvitationTokenBody,
   UpdateCalendarEventBody,
   UpdateNotificationStateBody,
   UpdatePermissionTemplateBody,
@@ -35,6 +36,7 @@ import type {
   WorkspaceTask,
 } from "@shadowproducer/contracts"
 import { accessAllows, type PermissionAccess } from "./access"
+import { isValidIsoCalendarDate } from "./date-validation"
 import { AppError } from "./script-service"
 
 export type TeamAccess = PermissionAccess
@@ -92,6 +94,23 @@ export type AcceptInvitationCommand = {
   idempotencyKey: AcceptInvitationBody["idempotencyKey"]
 }
 export type RevokeInvitationCommand = ItemCommand & { expectedRevision: number }
+export type RotateInvitationTokenCommand = ItemCommand & RotateInvitationTokenBody
+export type RevokeInvitationResult =
+  | UpdateResult<{ id: string }>
+  | { kind: "accepted" }
+  | { kind: "revoked" }
+  | { kind: "expired" }
+export type RotateInvitationResult =
+  | CreateResult<CreatedInvitation>
+  | { kind: "not_found" }
+  | { kind: "conflict" }
+  | { kind: "accepted" }
+  | { kind: "revoked" }
+  | { kind: "expired" }
+export type NotificationListQuery = {
+  page?: number
+  pageSize?: number
+}
 
 export interface WorkspaceRepository {
   getContext(actorId: string): Promise<WorkspaceContext | null>
@@ -111,9 +130,10 @@ export interface WorkspaceRepository {
   acceptInvitation(
     command: AcceptInvitationCommand,
   ): Promise<CreateResult<InvitationAcceptance>>
-  revokeInvitation(
-    command: RevokeInvitationCommand,
-  ): Promise<UpdateResult<{ id: string }>>
+  revokeInvitation(command: RevokeInvitationCommand): Promise<RevokeInvitationResult>
+  rotateInvitationToken(
+    command: RotateInvitationTokenCommand,
+  ): Promise<RotateInvitationResult>
   listAuditLogs(
     actorId: string,
     teamId: string,
@@ -122,7 +142,14 @@ export interface WorkspaceRepository {
   listNotifications(
     actorId: string,
     teamId: string,
-  ): Promise<{ items: WorkspaceNotification[]; unreadCount: number }>
+    query: { page: number; pageSize: number },
+  ): Promise<{
+    items: WorkspaceNotification[]
+    unreadCount: number
+    total: number
+    page: number
+    pageSize: number
+  }>
   updateNotification(
     command: UpdateNotificationCommand,
   ): Promise<WorkspaceNotification | null>
@@ -184,11 +211,13 @@ export class WorkspaceService {
   }
 
   async listAuditLogs(actorId: string, teamId: string, query: AuditLogQuery) {
-    await this.assertTeamAccess(actorId, teamId, "read")
+    await this.assertAuditAccess(actorId, teamId)
     if (query.projectId && query.scope === "team") {
       throw new AppError("AUDIT_FILTER_INVALID", "团队范围与项目筛选不能同时使用", 400)
     }
     await this.assertOptionalProject({ actorId, teamId }, query.projectId)
+    this.assertOptionalIsoDateTime(query.from)
+    this.assertOptionalIsoDateTime(query.to)
     if (query.from && query.to && new Date(query.from) > new Date(query.to)) {
       throw new AppError("AUDIT_DATE_RANGE_INVALID", "审计结束时间不能早于开始时间", 400)
     }
@@ -199,13 +228,20 @@ export class WorkspaceService {
     })
   }
 
-  async listNotifications(actorId: string, teamId: string) {
-    await this.assertTeamAccess(actorId, teamId, "read")
-    return this.repository.listNotifications(actorId, teamId)
+  async listNotifications(
+    actorId: string,
+    teamId: string,
+    query: NotificationListQuery = {},
+  ) {
+    await this.assertNotificationAccess(actorId, teamId)
+    return this.repository.listNotifications(actorId, teamId, {
+      page: query.page ?? 1,
+      pageSize: query.pageSize ?? 50,
+    })
   }
 
   async updateNotification(command: UpdateNotificationCommand) {
-    await this.assertTeamAccess(command.actorId, command.teamId, "read")
+    await this.assertNotificationAccess(command.actorId, command.teamId)
     const item = await this.repository.updateNotification(command)
     if (!item) {
       throw new AppError("RESOURCE_NOT_FOUND", "通知不存在或已不可见", 404)
@@ -214,17 +250,17 @@ export class WorkspaceService {
   }
 
   async markAllNotificationsRead(actorId: string, teamId: string) {
-    await this.assertTeamAccess(actorId, teamId, "read")
+    await this.assertNotificationAccess(actorId, teamId)
     return { updated: await this.repository.markAllNotificationsRead(actorId, teamId) }
   }
 
   async getNotificationPreferences(actorId: string, teamId: string) {
-    await this.assertTeamAccess(actorId, teamId, "read")
+    await this.assertNotificationAccess(actorId, teamId)
     return this.repository.getNotificationPreferences(actorId, teamId)
   }
 
   async updateNotificationPreferences(command: UpdateNotificationPreferencesCommand) {
-    await this.assertTeamAccess(command.actorId, command.teamId, "read")
+    await this.assertNotificationAccess(command.actorId, command.teamId)
     return this.repository.updateNotificationPreferences(command)
   }
 
@@ -354,7 +390,49 @@ export class WorkspaceService {
       command.teamId,
       "team.permissions.manage",
     )
-    return this.unwrapMutation(await this.repository.revokeInvitation(command), "邀请")
+    const result = await this.repository.revokeInvitation(command)
+    if (result.kind === "not_found") {
+      throw new AppError("RESOURCE_NOT_FOUND", "邀请不存在", 404)
+    }
+    if (result.kind === "accepted") {
+      throw new AppError("INVITATION_ALREADY_ACCEPTED", "邀请已被接受", 410)
+    }
+    if (result.kind === "revoked") {
+      throw new AppError("INVITATION_REVOKED", "邀请已被撤销", 410)
+    }
+    if (result.kind === "expired") {
+      throw new AppError("INVITATION_EXPIRED", "邀请已过期", 410)
+    }
+    return this.unwrapMutation(result, "邀请")
+  }
+
+  async rotateInvitationToken(command: RotateInvitationTokenCommand) {
+    await this.assertTeamCapability(
+      command.actorId,
+      command.teamId,
+      "team.permissions.manage",
+    )
+    const result = await this.repository.rotateInvitationToken(command)
+    if ("kind" in result && result.kind === "not_found") {
+      throw new AppError("RESOURCE_NOT_FOUND", "邀请不存在", 404)
+    }
+    if ("kind" in result && result.kind === "conflict") {
+      throw new AppError(
+        "RESOURCE_CONFLICT",
+        "邀请已在其他位置更新，请重新载入后再试",
+        409,
+      )
+    }
+    if ("kind" in result && result.kind === "accepted") {
+      throw new AppError("INVITATION_ALREADY_ACCEPTED", "邀请已被接受", 410)
+    }
+    if ("kind" in result && result.kind === "revoked") {
+      throw new AppError("INVITATION_REVOKED", "邀请已被撤销", 410)
+    }
+    if ("kind" in result && result.kind === "expired") {
+      throw new AppError("INVITATION_EXPIRED", "邀请已过期", 410)
+    }
+    return result
   }
 
   async listTasks(actorId: string, teamId: string) {
@@ -364,12 +442,14 @@ export class WorkspaceService {
 
   async createTask(command: CreateTaskCommand) {
     await this.assertTeamAccess(command.actorId, command.teamId, "write")
+    this.assertOptionalIsoDate(command.dueDate)
     await this.assertOptionalProject(command, command.projectId)
     return this.repository.createTask(command)
   }
 
   async updateTask(command: UpdateTaskCommand) {
     await this.assertTeamAccess(command.actorId, command.teamId, "write")
+    this.assertOptionalIsoDate(command.dueDate)
     return this.unwrapMutation(await this.repository.updateTask(command), "任务")
   }
 
@@ -386,12 +466,19 @@ export class WorkspaceService {
   async createCalendarEvent(command: CreateCalendarEventCommand) {
     await this.assertTeamAccess(command.actorId, command.teamId, "write")
     await this.assertOptionalProject(command, command.projectId)
+    this.assertIsoDateTime(command.startsAt)
+    this.assertOptionalIsoDateTime(command.endsAt)
     this.assertCalendarRange(command.startsAt, command.endsAt)
     return this.repository.createCalendarEvent(command)
   }
 
   async updateCalendarEvent(command: UpdateCalendarEventCommand) {
     await this.assertTeamAccess(command.actorId, command.teamId, "write")
+    this.assertOptionalIsoDateTime(command.startsAt)
+    this.assertOptionalIsoDateTime(command.endsAt)
+    if (command.startsAt && command.endsAt) {
+      this.assertCalendarRange(command.startsAt, command.endsAt)
+    }
     return this.unwrapMutation(await this.repository.updateCalendarEvent(command), "日程")
   }
 
@@ -425,12 +512,23 @@ export class WorkspaceService {
   }
 
   async listDeletedItems(actorId: string, teamId: string) {
-    await this.assertTeamAccess(actorId, teamId, "read")
-    return { items: await this.repository.listDeletedItems(actorId, teamId) }
+    const access = await this.assertTeamAccess(actorId, teamId, "read")
+    return {
+      items: await this.repository.listDeletedItems(actorId, teamId),
+      canManageShared: accessAllows(access, "team.recycle.manage", "write"),
+    }
   }
 
   async restoreDeletedItem(command: RestoreRecycleItemCommand) {
-    await this.assertTeamAccess(command.actorId, command.teamId, "write")
+    if (command.kind === "team-contact" || command.kind === "supplier") {
+      await this.assertTeamCapability(
+        command.actorId,
+        command.teamId,
+        "team.recycle.manage",
+      )
+    } else {
+      await this.assertTeamAccess(command.actorId, command.teamId, "write")
+    }
     return this.unwrapMutation(
       await this.repository.restoreDeletedItem(command),
       "回收站项目",
@@ -438,11 +536,45 @@ export class WorkspaceService {
   }
 
   async permanentlyDeleteDeletedItem(command: PermanentlyDeleteRecycleItemCommand) {
-    await this.assertTeamAccess(command.actorId, command.teamId, "write")
+    if (command.kind === "team-contact" || command.kind === "supplier") {
+      await this.assertTeamCapability(
+        command.actorId,
+        command.teamId,
+        "team.recycle.manage",
+      )
+    } else {
+      await this.assertTeamAccess(command.actorId, command.teamId, "write")
+    }
     return this.unwrapMutation(
       await this.repository.permanentlyDeleteDeletedItem(command),
       "回收站项目",
     )
+  }
+
+  private async assertAuditAccess(actorId: string, teamId: string) {
+    const teamAccess = await this.repository.getTeamAccess(actorId, teamId)
+    if (teamAccess?.canRead) return teamAccess
+    const context = await this.repository.getContext(actorId)
+    const projectOnly = context?.teams.some(
+      (team) => team.id === teamId && team.role === null && team.projects.length > 0,
+    )
+    if (!projectOnly) {
+      throw new AppError("TEAM_ACCESS_DENIED", "无权访问当前团队", 403)
+    }
+    return null
+  }
+
+  private async assertNotificationAccess(actorId: string, teamId: string) {
+    const teamAccess = await this.repository.getTeamAccess(actorId, teamId)
+    if (teamAccess?.canRead) return teamAccess
+    const context = await this.repository.getContext(actorId)
+    const projectOnly = context?.teams.some(
+      (team) => team.id === teamId && team.role === null && team.projects.length > 0,
+    )
+    if (!projectOnly) {
+      throw new AppError("TEAM_ACCESS_DENIED", "无权访问当前团队", 403)
+    }
+    return null
   }
 
   private async assertTeamAccess(
@@ -487,6 +619,7 @@ export class WorkspaceService {
             "team.read",
             "team.write",
             "team.permissions.manage",
+            "team.recycle.manage",
             "asset.write",
             "portfolio.write",
             "portfolio.publish",
@@ -569,7 +702,27 @@ export class WorkspaceService {
     return result.item
   }
 
+  private assertOptionalIsoDate(value: string | null | undefined) {
+    if (value === undefined || value === null) return
+    if (!isValidIsoCalendarDate(value)) {
+      throw new AppError("INVALID_DATE", "日期无效", 400)
+    }
+  }
+
+  private assertIsoDateTime(value: string) {
+    if (!isValidIsoCalendarDate(value) || !Number.isFinite(new Date(value).getTime())) {
+      throw new AppError("INVALID_DATE", "日期时间无效", 400)
+    }
+  }
+
+  private assertOptionalIsoDateTime(value: string | null | undefined) {
+    if (value === undefined || value === null) return
+    this.assertIsoDateTime(value)
+  }
+
   private assertCalendarRange(startsAt: string, endsAt?: string | null) {
+    this.assertIsoDateTime(startsAt)
+    this.assertOptionalIsoDateTime(endsAt)
     if (endsAt && new Date(endsAt) < new Date(startsAt)) {
       throw new AppError("INVALID_CALENDAR_RANGE", "日程结束时间不能早于开始时间", 400)
     }
