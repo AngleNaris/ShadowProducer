@@ -3480,3 +3480,13 @@
 
 - 当前 Web 权限页仍只提供 team-scope invitation 创建 UI；project-scope invitation 的后端 contract/service/API 已可用，但 project invitation UI 不计入本轮完成。
 - 首次创建响应丢失后的明文 token 找回仍没有安全通道；由于 token 不持久化，不能通过新幂等键伪造 resend 或找回旧 token。真实 AI provider、SMTP、真实邮件、真实媒体处理和目标环境供应商兼容性仍需后续凭据与环境验收。
+## 134. 2026-09-22 v0.1 试用基线入库与邀请测试时效修复
+
+本轮没有新增业务功能。按外部咨询结论（优先级：先入库、再封缺口、后部署准备），把三个已验证里程碑从未提交状态整理为可回滚的提交基线，并修复基线重验暴露的测试时效缺陷：
+
+- 此前约 60 个修改与 15 个未跟踪文件横跨 onboarding（131-133 章）、显示预览 v2 与 HLS 播放三个已验证里程碑。现按里程碑拆分为 5 个提交：gitignore 卫生与证据截图白名单（chore）、onboarding/workspace 加固（32 文件）、媒体管线 preview-v2 + HLS（36 文件；两里程碑共享 worker/路由文件且中间状态已不存在于工作树，故合并为一个可构建提交）、Agent 命令日期 schema 收紧、验证记录与截图入库（docs）。工作树回归干净；main 领先 origin/main 5 个提交，未推送。
+- 基线重验发现 `workspace-onboarding.test.ts` 与 `workspace-onboarding-api.test.ts` 把邀请 `expiresAt` 硬编码为 `2026-09-11`，随真实时钟推移已过期，预览/接受用例得到 `410` 而非 `200`；已改为相对当前时间推导（+7 天/-7 天），消除时间炸弹，不改变被测行为。
+- 修复后本环境验证：API 单元测试 `225/225` 通过（`vitest --pool=threads`，排除 PostgreSQL 集成套件）；Web 单元测试 `68/68` 通过（`node --test --test-isolation=none`）；contracts、application、api、web、test-fixtures `tsc --noEmit` 全部通过；application 与 web `biome check` 通过，api 编辑文件 biome 复查通过。
+- 受本会话执行环境限制未重跑：PostgreSQL 集成测试与 Playwright E2E（Docker 守护进程对本会话拒绝访问，`127.0.0.1:5433` 未监听）；`next build` 生产构建（沙箱对 Turbopack 派生 postcss node 工作进程返回 `os error 5`，提权后三次尝试均未在执行器 600 秒上限内完成）。提交树相对 2026-09-06 已验证构建仅变更 `.gitignore` 与 `apps/api` 测试文件，web 构建输入逐字节一致，此前 `pnpm build` 通过证据仍适用于当前提交内容。
+- 环境记录：本会话对 node 子进程派生（node:test 工作进程、turbo→biome、Turbopack postcss pool）返回 `os error 5`；pwsh 管道（`2>&1`、`| Select-String`）会触发执行器 stderr 处理缺陷并连带启动失败。可用验证均通过逐包直接调用与线程池参数完成；被超时中断的构建进程已由执行器按树终止。
+- 明确边界：本轮不宣称生产发布、AI provider、SMTP、真实邮件或全部真人浏览器验收完成；Web `3211`、API `3220` 与数据库当前未运行，重启后需按 README 验证命令复跑完整套件。下一迭代按咨询结论进入 project-scope 邀请 UI，随后做 Safari/iOS 与 200% 缩放真人验收。
