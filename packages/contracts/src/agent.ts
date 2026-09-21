@@ -102,8 +102,18 @@ export const AgentPreviewBodySchema = Type.Union([
     scope: Type.Optional(Type.Literal("team")),
     auditAction: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
     actor: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
-    from: Type.Optional(Type.String({ format: "date-time" })),
-    to: Type.Optional(Type.String({ format: "date-time" })),
+    from: Type.Optional(
+      Type.String({
+        pattern:
+          "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+      }),
+    ),
+    to: Type.Optional(
+      Type.String({
+        pattern:
+          "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+      }),
+    ),
     page: Type.Optional(Type.Integer({ minimum: 1 })),
     pageSize: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
   }),
@@ -192,7 +202,9 @@ export const AgentPreviewBodySchema = Type.Union([
     taskId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
     taskTitle: Type.Optional(Type.String({ minLength: 1, maxLength: 300 })),
     title: Type.Optional(Type.String({ minLength: 1, maxLength: 300 })),
-    dueDate: Type.Optional(Type.Union([Type.String({ format: "date" }), Type.Null()])),
+    dueDate: Type.Optional(
+      Type.Union([Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }), Type.Null()]),
+    ),
     status: Type.Optional(TaskStatusSchema),
     target: Type.Optional(Type.String({ minLength: 1, maxLength: 50 })),
   }),
@@ -218,9 +230,18 @@ export const AgentPreviewBodySchema = Type.Union([
     teamId: Type.String({ minLength: 1, maxLength: 100 }),
     projectId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
     title: Type.String({ minLength: 1, maxLength: 300 }),
-    startsAt: Type.String({ format: "date-time" }),
+    startsAt: Type.String({
+      pattern:
+        "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+    }),
     endsAt: Type.Optional(
-      Type.Union([Type.String({ format: "date-time" }), Type.Null()]),
+      Type.Union([
+        Type.String({
+          pattern:
+            "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+        }),
+        Type.Null(),
+      ]),
     ),
     timezone: Type.String({ minLength: 1, maxLength: 80 }),
     allDay: Type.Optional(Type.Boolean()),
@@ -238,7 +259,10 @@ export const AgentPreviewBodySchema = Type.Union([
     projectId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
     eventId: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
     eventTitle: Type.Optional(Type.String({ minLength: 1, maxLength: 300 })),
-    startsAt: Type.String({ format: "date-time" }),
+    startsAt: Type.String({
+      pattern:
+        "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+    }),
     timezone: Type.String({ minLength: 1, maxLength: 80 }),
     allDay: Type.Optional(Type.Boolean()),
   }),
