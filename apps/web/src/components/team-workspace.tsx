@@ -1,10 +1,21 @@
 "use client"
 
 import type { AuditLog, WorkspaceContext } from "@shadowproducer/contracts"
-import { useQuery } from "@tanstack/react-query"
-import { ArrowUpRight, Film } from "lucide-react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { ArrowUpRight, Film, LoaderCircle, Plus } from "lucide-react"
+import { useState } from "react"
 
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import {
   EmptyState,
   PageFrame,
@@ -14,7 +25,8 @@ import {
   workspaceInteractiveCardClassName,
 } from "@/components/workspace/page-elements"
 import type { ProjectId } from "@/components/workspace/workspace-data"
-import { workspaceApi } from "@/lib/api-client"
+import { onboardingApi, workspaceApi } from "@/lib/api-client"
+import { onboardingErrorMessage } from "@/lib/onboarding"
 import { cn } from "@/lib/utils"
 
 type WorkspaceTeam = WorkspaceContext["teams"][number]
@@ -51,6 +63,47 @@ export function TeamOverview({
   })
   const projects = team.projects
 
+  const [createOpen, setCreateOpen] = useState(false)
+  const [projectName, setProjectName] = useState("")
+  const [createError, setCreateError] = useState("")
+  const queryClient = useQueryClient()
+  const createProjectMutation = useMutation({
+    mutationFn: () => {
+      const name = projectName.trim()
+      if (!name) throw new Error("请输入项目名称")
+      return onboardingApi.createProject(team.id, {
+        name,
+        idempotencyKey: crypto.randomUUID(),
+      })
+    },
+    onSuccess: async ({ item }) => {
+      setCreateOpen(false)
+      setProjectName("")
+      setCreateError("")
+      await queryClient.invalidateQueries({ queryKey: ["workspace-context"] })
+      onProjectChange(item.id)
+    },
+  })
+
+  const submitCreateProject = () => {
+    setCreateError(projectName.trim() ? "" : "请输入项目名称")
+    if (!projectName.trim() || createProjectMutation.isPending) return
+    createProjectMutation.mutate()
+  }
+
+  const openCreateProject = () => {
+    setCreateError("")
+    setProjectName("")
+    setCreateOpen(true)
+  }
+
+  const createButton = (
+    <Button type="button" onClick={openCreateProject}>
+      <Plus />
+      新建项目
+    </Button>
+  )
+
   return (
     <PageFrame>
       <WorkspaceHeader title="团队概览" />
@@ -59,6 +112,7 @@ export function TeamOverview({
           <SectionHeader
             title="项目概览"
             detail={`${team.name} · ${projects.length} 个项目`}
+            action={createButton}
           />
           <div
             className={cn(
@@ -98,8 +152,9 @@ export function TeamOverview({
             {!projects.length ? (
               <EmptyState
                 title="这个团队还没有项目"
-                detail="项目创建或授权后会显示在这里。"
+                detail="点击上方「新建项目」立即创建；或等待项目授权后显示在这里。"
                 className="sm:col-span-2 lg:col-span-4"
+                action={createButton}
               />
             ) : null}
           </div>
@@ -190,6 +245,84 @@ export function TeamOverview({
           </section>
         </div>
       </div>
+
+      <Dialog
+        open={createOpen}
+        onOpenChange={(open) => {
+          if (!open && createProjectMutation.isPending) return
+          setCreateOpen(open)
+          if (open) openCreateProject()
+        }}
+      >
+        <DialogContent
+          className="sm:max-w-md"
+          showCloseButton={!createProjectMutation.isPending}
+        >
+          <DialogHeader>
+            <DialogTitle>新建项目</DialogTitle>
+            <DialogDescription>
+              项目会创建在当前团队下，创建后你将以项目负责人身份进入项目空间。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-1.5">
+            <label htmlFor="new-project-name" className="text-xs font-medium">
+              项目名称
+            </label>
+            <Input
+              id="new-project-name"
+              autoFocus
+              value={projectName}
+              maxLength={80}
+              aria-invalid={createError ? true : undefined}
+              aria-describedby={createError ? "new-project-name-error" : undefined}
+              disabled={createProjectMutation.isPending}
+              onChange={(event) => {
+                setProjectName(event.target.value)
+                if (createError) setCreateError("")
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") submitCreateProject()
+              }}
+              placeholder="例如：冬夜咖啡"
+            />
+            {createError ? (
+              <span
+                id="new-project-name-error"
+                role="alert"
+                className="text-xs text-destructive"
+              >
+                {createError}
+              </span>
+            ) : null}
+            {createProjectMutation.isError ? (
+              <p role="alert" className="text-xs text-destructive">
+                {onboardingErrorMessage(createProjectMutation.error, "项目创建失败")}
+              </p>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={createProjectMutation.isPending}
+              >
+                取消
+              </Button>
+            </DialogClose>
+            <Button
+              type="button"
+              disabled={createProjectMutation.isPending || !projectName.trim()}
+              onClick={submitCreateProject}
+            >
+              {createProjectMutation.isPending ? (
+                <LoaderCircle className="animate-spin" aria-hidden="true" />
+              ) : null}
+              {createProjectMutation.isPending ? "正在创建" : "创建项目"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </PageFrame>
   )
 }
