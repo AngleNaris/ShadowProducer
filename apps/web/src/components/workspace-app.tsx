@@ -303,7 +303,13 @@ function AuthenticatedWorkspace({
                   <TeamPortfolio teamId={route.teamId} />
                 ) : null}
                 {route.view === "permissions" ? (
-                  <TeamPermissions teamId={route.teamId} />
+                  <TeamPermissions
+                    teamId={route.teamId}
+                    projects={currentTeam.projects.map((project) => ({
+                      id: project.id,
+                      name: project.name,
+                    }))}
+                  />
                 ) : null}
                 {route.view === "audit" ? <TeamAudit team={currentTeam} /> : null}
                 {route.view === "recycle-bin" ? (

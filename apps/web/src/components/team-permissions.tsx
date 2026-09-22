@@ -219,7 +219,13 @@ function TemplateSelect({
   )
 }
 
-export function TeamPermissions({ teamId }: { teamId: TeamId }) {
+export function TeamPermissions({
+  teamId,
+  projects,
+}: {
+  teamId: TeamId
+  projects: { id: string; name: string }[]
+}) {
   const queryClient = useQueryClient()
   const queryKey = ["team-permissions", teamId] as const
   const permissionsQuery = useQuery({
@@ -604,6 +610,7 @@ export function TeamPermissions({ teamId }: { teamId: TeamId }) {
                 teamId={teamId}
                 canManage={canManage}
                 templates={templates}
+                projects={projects}
               />
             </TabsContent>
           </Tabs>
@@ -700,10 +707,12 @@ function InvitationsPanel({
   teamId,
   canManage,
   templates,
+  projects,
 }: {
   teamId: TeamId
   canManage: boolean
   templates: PermissionTemplate[]
+  projects: { id: string; name: string }[]
 }) {
   const queryClient = useQueryClient()
   const listQuery = useQuery({
@@ -714,12 +723,15 @@ function InvitationsPanel({
   const [inviteEmail, setInviteEmail] = useState("")
   const [inviteEmailError, setInviteEmailError] = useState("")
   const [templateId, setTemplateId] = useState("")
+  const [inviteScope, setInviteScope] = useState<PermissionTemplateScope>("team")
+  const [inviteProjectId, setInviteProjectId] = useState("")
   const [expiresInDays, setExpiresInDays] = useState<number>(7)
   const [copiedId, setCopiedId] = useState("")
   const [copyError, setCopyError] = useState("")
   const [lastCreated, setLastCreated] = useState<CreatedInvitation | null>(null)
 
   const teamTemplates = templates.filter((template) => template.scope === "team")
+  const projectTemplates = templates.filter((template) => template.scope === "project")
   const invitations = listQuery.data?.items ?? []
   const createdLinkUrl = lastCreated?.token
     ? buildInvitationUrl(window.location.origin, lastCreated.token)
@@ -753,6 +765,8 @@ function InvitationsPanel({
     setCopyError("")
     setInviteEmailError("")
     setInviteEmail("")
+    setInviteScope("team")
+    setInviteProjectId(projects[0]?.id ?? "")
     setTemplateId(teamTemplates[0]?.id ?? "")
     setExpiresInDays(7)
     setCreateOpen(true)
@@ -762,8 +776,12 @@ function InvitationsPanel({
     mutationFn: () => {
       const validation = validateInvitationEmail(inviteEmail)
       if (validation) throw new Error(validation)
+      if (inviteScope === "project" && !inviteProjectId) {
+        throw new Error("请选择要邀请加入的项目")
+      }
       return onboardingApi.createInvitation(teamId, {
-        scope: "team",
+        scope: inviteScope,
+        projectId: inviteScope === "project" ? inviteProjectId : undefined,
         email: inviteEmail.trim(),
         permissionTemplateId: templateId || undefined,
         expiresInDays: expiresInDays as 7 | 30 | 90,
@@ -813,7 +831,7 @@ function InvitationsPanel({
     <PageBody scroll="y">
       <SectionHeader
         title="邀请链接"
-        detail="创建链接后复制给受邀人，对方登录并接受后即可加入团队。系统不会代发邮件。"
+        detail="创建链接后复制给受邀人，对方登录并接受后即可加入团队或指定项目。系统不会代发邮件。"
         action={
           <Button
             type="button"
@@ -870,7 +888,7 @@ function InvitationsPanel({
                     </span>
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">
-                    {`权限模板：${templateName(invitation.permissionTemplateId)} · 创建于 ${formatInvitationDate(invitation.createdAt, "未知")} · ${formatInvitationDate(invitation.expiresAt, "长期有效")}`}
+                    {`${invitation.scope === "project" ? `项目邀请 · ${invitation.projectName ?? "未知项目"}` : "团队邀请"} · 权限模板：${templateName(invitation.permissionTemplateId)} · 创建于 ${formatInvitationDate(invitation.createdAt, "未知")} · ${formatInvitationDate(invitation.expiresAt, "长期有效")}`}
                   </div>
                 </div>
                 <div className="flex flex-none items-center gap-2">
@@ -917,7 +935,7 @@ function InvitationsPanel({
         <EmptyState
           icon={<UserRoundPlus className="size-5" />}
           title="暂无邀请链接"
-          detail="创建链接后发送给受邀人，对方登录并接受后即可加入团队。"
+          detail="创建链接后发送给受邀人，对方登录并接受后即可加入团队或指定项目。"
           className="min-h-32"
         />
       )}
@@ -995,6 +1013,69 @@ function InvitationsPanel({
             </div>
           ) : (
             <div className="space-y-5">
+              <Tabs
+                value={inviteScope}
+                onValueChange={(value) => {
+                  const nextScope = value as PermissionTemplateScope
+                  setInviteScope(nextScope)
+                  setInviteEmailError("")
+                  setTemplateId(
+                    nextScope === "team"
+                      ? (teamTemplates[0]?.id ?? "")
+                      : (projectTemplates[0]?.id ?? ""),
+                  )
+                }}
+              >
+                <TabsList className="w-full">
+                  <TabsTrigger value="team" className="flex-1">
+                    加入团队
+                  </TabsTrigger>
+                  <TabsTrigger
+                    value="project"
+                    className="flex-1"
+                    disabled={!projects.length}
+                    title={projects.length ? undefined : "当前团队还没有项目"}
+                  >
+                    加入项目
+                  </TabsTrigger>
+                </TabsList>
+              </Tabs>
+              {inviteScope === "project" ? (
+                <div className="grid gap-1.5">
+                  <span className="text-xs font-medium">目标项目</span>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="w-full justify-between"
+                        disabled={createMutation.isPending}
+                        aria-label="选择项目"
+                      >
+                        <span className="truncate">
+                          {projects.find((project) => project.id === inviteProjectId)
+                            ?.name ?? "选择项目"}
+                        </span>
+                        <ChevronDown />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
+                      <DropdownMenuRadioGroup
+                        value={inviteProjectId}
+                        onValueChange={setInviteProjectId}
+                      >
+                        {projects.map((project) => (
+                          <DropdownMenuRadioItem key={project.id} value={project.id}>
+                            <span className="min-w-0 flex-1 truncate">
+                              {project.name}
+                            </span>
+                          </DropdownMenuRadioItem>
+                        ))}
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              ) : null}
               <div className="grid gap-1.5">
                 <label htmlFor="invitation-email" className="text-xs font-medium">
                   受邀邮箱
@@ -1027,8 +1108,12 @@ function InvitationsPanel({
               <div className="grid gap-1.5">
                 <span className="text-xs font-medium">受邀人权限模板</span>
                 <TemplateSelect
-                  label="选择受邀人的团队权限模板"
-                  templates={teamTemplates}
+                  label={
+                    inviteScope === "team"
+                      ? "选择受邀人的团队权限模板"
+                      : "选择受邀人的项目权限模板"
+                  }
+                  templates={inviteScope === "team" ? teamTemplates : projectTemplates}
                   value={templateId || null}
                   disabled={createMutation.isPending}
                   onChange={setTemplateId}
