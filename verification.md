@@ -3490,3 +3490,14 @@
 - 受本会话执行环境限制未重跑：PostgreSQL 集成测试与 Playwright E2E（Docker 守护进程对本会话拒绝访问，`127.0.0.1:5433` 未监听）；`next build` 生产构建（沙箱对 Turbopack 派生 postcss node 工作进程返回 `os error 5`，提权后三次尝试均未在执行器 600 秒上限内完成）。提交树相对 2026-09-06 已验证构建仅变更 `.gitignore` 与 `apps/api` 测试文件，web 构建输入逐字节一致，此前 `pnpm build` 通过证据仍适用于当前提交内容。
 - 环境记录：本会话对 node 子进程派生（node:test 工作进程、turbo→biome、Turbopack postcss pool）返回 `os error 5`；pwsh 管道（`2>&1`、`| Select-String`）会触发执行器 stderr 处理缺陷并连带启动失败。可用验证均通过逐包直接调用与线程池参数完成；被超时中断的构建进程已由执行器按树终止。
 - 明确边界：本轮不宣称生产发布、AI provider、SMTP、真实邮件或全部真人浏览器验收完成；Web `3211`、API `3220` 与数据库当前未运行，重启后需按 README 验证命令复跑完整套件。下一迭代按咨询结论进入 project-scope 邀请 UI，随后做 Safari/iOS 与 200% 缩放真人验收。
+## 135. 2026-09-22 试用前外部复核修复与本地栈交付
+
+按外部复核（ChatGPT Web High 实际读取 GitHub 仓库 diff 与当前文件）结论修复 3 个 blocker，使项目进入可人工测试状态：
+
+- Blocker 1（部分修复）：公开邀请预览不再返回完整受邀邮箱，改为 `首字符***@域名` 掩码（`apps/api/src/app.ts` 的 `maskInvitedEmail`，仅路由层，accept 的服务端全邮箱比对不变）。完整修复需 SMTP 邮箱验证，仍属凭据依赖项；试用部署建议将 `AUTH_ALLOW_SIGN_UP` 设为 `false` 并预置账号，若保持开放注册则已知残余风险为「token 持有者可注册受邀邮箱」。
+- Blocker 2：Fastify 请求日志对含 `/invitations/` 的 URL 全局脱敏为 `[REDACTED_INVITATION_URL]`，明文 token 不再进入日志；Web 接受流程的 sessionStorage 幂等键改用 token 的 SHA-256 摘要索引，明文 token 不再写入 Web Storage。已用真实服务活体验证：请求不存在邀请返回 404，服务日志显示 `[REDACTED_INVITATION_URL]` 而非原始 URL。
+- Blocker 3：邀请获得 `expired` 终态（迁移 081 重建 status/复合 CHECK 约束并把存量过期 pending 行翻转为 expired）；`createInvitation` 在同一事务内先把同 team/scope/email 的过期 pending 行翻转为 expired 再查重，自然过期后同邮箱可重新邀请；accept/preview/rotate/revoke 对 expired 行统一返回 `INVITATION_EXPIRED` 410。
+- 工程验证：API 单元 `225/225`、PostgreSQL 集成 `71/71`（新增「过期后重新邀请成功 + expired 终态四路拒绝」回归）、Web 单元 `68/68`、api/web `tsc --noEmit`、biome 通过；Kysely `Database` 类型同步 `expired`。
+- 复核确认无需修改：project-only 隔离（`postgres-access.ts` leftJoin + inner join 组合）、HLS manifest 路径白名单、邀请持久化主体（hash-only、行锁、advisory lock）均被判定无越权路径。
+- 遗留（下一轮）：should-fix 的媒体 worker 租约心跳/分阶段 deadline、权限页项目列表改用团队全量可管理项目（当前取自本人成员关系，管理员未加入的项目在 UI 不可见但 API 可用）；完整邮箱验证依赖 SMTP 凭据。
+- 本地栈：`infra/docker-compose.yml` 的 PostgreSQL 与 MinIO 已启动，迁移 081 已应用并完成确定性 seed；Web `http://127.0.0.1:3211` 与 API `http://127.0.0.1:3220`（`/healthz` 200）作为应用服务有意保留供人工测试。人工验收路径：权限页 → 邀请链接 → 「加入项目」→ 选择项目与项目权限模板 → 创建并复制一次性链接 → 受邀账号登录接受 → 项目成员可见且团队级入口不可见。
