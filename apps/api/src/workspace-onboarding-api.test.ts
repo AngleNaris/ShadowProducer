@@ -213,7 +213,7 @@ describe("workspace onboarding HTTP routes", () => {
 
     expect(preview.statusCode).toBe(200)
     expect(preview.headers["cache-control"]).toBe("no-store")
-    expect(preview.json().item.email).toBe("invitee@shadowproducer.local")
+    expect(preview.json().item.email).toBe("i***@shadowproducer.local")
     expect(spoofed.statusCode).toBe(201)
     expect(repository.acceptedActors).toEqual(["account-fanxing"])
   })

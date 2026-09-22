@@ -858,31 +858,43 @@ export const onboardingApi = {
     ).then((response) => response.item)
   },
   acceptInvitation(token: string) {
-    const storageKey = `shadowproducer:invitation-accept:${token}`
-    let idempotencyKey: string
-    try {
-      idempotencyKey = window.sessionStorage.getItem(storageKey) ?? crypto.randomUUID()
-      window.sessionStorage.setItem(storageKey, idempotencyKey)
-    } catch {
-      // Non-browser callers still get a valid request; browser retries reuse the key.
-      idempotencyKey = crypto.randomUUID()
-    }
-    return apiRequest<{
-      item: AcceptInvitationResponse
-      replayed: boolean
-    }>(`/invitations/${encodeURIComponent(token)}/accept`, {
-      method: "POST",
-      body: JSON.stringify({
-        idempotencyKey,
-      }),
-    }).then((response) => {
-      try {
-        window.sessionStorage.removeItem(storageKey)
-      } catch {
-        // Ignore storage cleanup failures after the server has committed.
-      }
-      return response.item
-    })
+    // Never persist the plaintext invitation token in Web Storage; index the
+    // idempotency key by a SHA-256 digest of the token instead.
+    return crypto.subtle
+      .digest("SHA-256", new TextEncoder().encode(token))
+      .then((hashed) => {
+        const hex = Array.from(new Uint8Array(hashed))
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join("")
+        return `shadowproducer:invitation-accept:${hex.slice(0, 32)}`
+      })
+      .then((storageKey) => {
+        let idempotencyKey: string
+        try {
+          idempotencyKey =
+            window.sessionStorage.getItem(storageKey) ?? crypto.randomUUID()
+          window.sessionStorage.setItem(storageKey, idempotencyKey)
+        } catch {
+          // Non-browser callers still get a valid request; browser retries reuse the key.
+          idempotencyKey = crypto.randomUUID()
+        }
+        return apiRequest<{
+          item: AcceptInvitationResponse
+          replayed: boolean
+        }>(`/invitations/${encodeURIComponent(token)}/accept`, {
+          method: "POST",
+          body: JSON.stringify({
+            idempotencyKey,
+          }),
+        }).then((response) => {
+          try {
+            window.sessionStorage.removeItem(storageKey)
+          } catch {
+            // Ignore storage cleanup failures after the server has committed.
+          }
+          return response.item
+        })
+      })
   },
 }
 

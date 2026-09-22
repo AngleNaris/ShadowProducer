@@ -482,6 +482,7 @@ export const InvitationStatusSchema = Type.Union([
   Type.Literal("pending"),
   Type.Literal("accepted"),
   Type.Literal("revoked"),
+  Type.Literal("expired"),
 ])
 
 export const InvitationSummarySchema = Type.Object({

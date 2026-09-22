@@ -681,6 +681,7 @@ const invitationStatusMeta: Record<
   pending: { label: "可加入", tone: "primary" },
   accepted: { label: "已加入", tone: "success" },
   revoked: { label: "已撤销", tone: "neutral" },
+  expired: { label: "已过期", tone: "warning" },
 }
 
 function invitationDisplayStatus(invitation: {

@@ -1161,6 +1161,20 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
           templateId = template.id
         }
 
+        // 自然过期的邀请不再占用 pending 槽位：在同一事务内先翻转状态，
+        // 让同邮箱同作用域可以重新发起邀请（unique 索引只覆盖 pending）。
+        const expireQuery = transaction
+          .updateTable("onboarding_invitations")
+          .set({ status: "expired", updated_at: new Date() })
+          .where("team_id", "=", command.teamId)
+          .where("email", "=", email)
+          .where("status", "=", "pending")
+          .where("expires_at", "<=", new Date())
+        await (command.scope === "project"
+          ? expireQuery.where("project_id", "=", projectId ?? "")
+          : expireQuery.where("project_id", "is", null)
+        ).execute()
+
         const pendingQuery = transaction
           .selectFrom("onboarding_invitations")
           .select("id")
@@ -2639,7 +2653,7 @@ export class PostgresWorkspaceRepository implements WorkspaceRepository {
     scope: "team" | "project"
     email: string
     role: string
-    status: "pending" | "accepted" | "revoked"
+    status: "pending" | "accepted" | "revoked" | "expired"
     invited_by_account_id: string
     invited_by_name: string
     accepted_account_id: string | null

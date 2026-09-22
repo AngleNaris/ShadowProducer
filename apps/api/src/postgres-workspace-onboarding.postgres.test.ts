@@ -1009,4 +1009,71 @@ describe("Postgres workspace onboarding", () => {
       service.getInvitationSummary(expiredInvitation.item.token as string),
     ).rejects.toMatchObject({ code: "INVITATION_EXPIRED", statusCode: 410 })
   })
+  it("allows re-inviting an email after its invitation naturally expires", async () => {
+    const stale = await service.createInvitation({
+      actorId: ownerId,
+      teamId,
+      scope: "team",
+      email: outsiderEmail,
+      idempotencyKey: `${runId}-invite-reexpire`,
+    })
+    await database
+      .updateTable("onboarding_invitations")
+      .set({ expires_at: new Date(Date.now() - 60_000) })
+      .where("id", "=", stale.item.id)
+      .execute()
+
+    // 过期 pending 曾经永久占用唯一槽位导致同邮箱 409；现在应原子翻转并允许重建。
+    const recreated = await service.createInvitation({
+      actorId: ownerId,
+      teamId,
+      scope: "team",
+      email: outsiderEmail,
+      idempotencyKey: `${runId}-invite-after-expiry`,
+    })
+    expect(recreated.replayed).toBe(false)
+    expect(recreated.item.id).not.toBe(stale.item.id)
+    expect(recreated.item.token).toEqual(expect.any(String))
+
+    // 旧行进入 expired 终态：accept/rotate/revoke 一律 410 INVITATION_EXPIRED。
+    await expect(
+      service.getInvitationSummary(stale.item.token as string),
+    ).rejects.toMatchObject({ code: "INVITATION_EXPIRED", statusCode: 410 })
+    await expect(
+      service.acceptInvitation({
+        actorId: outsiderId,
+        token: stale.item.token as string,
+        idempotencyKey: `${runId}-accept-after-expiry`,
+      }),
+    ).rejects.toMatchObject({ code: "INVITATION_EXPIRED", statusCode: 410 })
+    await expect(
+      service.rotateInvitationToken({
+        actorId: ownerId,
+        teamId,
+        itemId: stale.item.id,
+        expectedRevision: stale.item.revision,
+        idempotencyKey: `${runId}-rotate-after-expiry`,
+      }),
+    ).rejects.toMatchObject({ code: "INVITATION_EXPIRED", statusCode: 410 })
+    await expect(
+      service.revokeInvitation({
+        actorId: ownerId,
+        teamId,
+        itemId: stale.item.id,
+        expectedRevision: stale.item.revision,
+      }),
+    ).rejects.toMatchObject({ code: "INVITATION_EXPIRED", statusCode: 410 })
+
+    // 新邀请保持 pending 且可正常预览。
+    await expect(
+      service.getInvitationSummary(recreated.item.token as string),
+    ).resolves.toMatchObject({ item: { id: recreated.item.id, status: "pending" } })
+
+    await service.revokeInvitation({
+      actorId: ownerId,
+      teamId,
+      itemId: recreated.item.id,
+      expectedRevision: recreated.item.revision,
+    })
+  })
 })

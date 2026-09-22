@@ -257,9 +257,9 @@ export type Database = {
     permission_template_id: string
     role: ColumnType<string, string | undefined, string>
     status: ColumnType<
-      "pending" | "accepted" | "revoked",
-      "pending" | "accepted" | "revoked" | undefined,
-      "pending" | "accepted" | "revoked"
+      "pending" | "accepted" | "revoked" | "expired",
+      "pending" | "accepted" | "revoked" | "expired" | undefined,
+      "pending" | "accepted" | "revoked" | "expired"
     >
     invited_by_account_id: string
     accepted_account_id: ColumnType<

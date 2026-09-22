@@ -488,6 +488,12 @@ const invitationSummaryMutationJsonSchema = {
   },
 }
 
+function maskInvitedEmail(email: string) {
+  const [local, domain] = email.split("@")
+  if (!domain) return "***"
+  return local.slice(0, 1) + "***@" + domain
+}
+
 export async function buildApp({
   scriptService,
   scriptRealtimeStore,
@@ -503,7 +509,20 @@ export async function buildApp({
   authGateway,
   logger = true,
 }: AppOptions) {
-  const app = Fastify({ logger })
+  const loggerOption = logger
+    ? {
+        level: process.env.LOG_LEVEL ?? "info",
+        redact: {
+          paths: ["req.url"],
+          // Invitation tokens travel in the request URL; they must never reach logs.
+          censor: (url: unknown) =>
+            typeof url === "string" && url.includes("/invitations/")
+              ? "[REDACTED_INVITATION_URL]"
+              : url,
+        },
+      }
+    : false
+  const app = Fastify({ logger: loggerOption })
   type ScriptEvent = ScriptRealtimeEvent["event"] | "script.presence.updated"
   type ScriptEventStream = {
     actorId: string
@@ -1673,7 +1692,17 @@ export async function buildApp({
           },
         },
       },
-      async (request) => workspaceService.getInvitationSummary(request.params.token),
+      async (request) => {
+        const result = await workspaceService.getInvitationSummary(
+          request.params.token,
+        )
+        // The public preview must not hand out the full invited email; a
+        // recognizable prefix plus domain is enough for the invitee to
+        // confirm their own address without leaking it to token holders.
+        return {
+          item: { ...result.item, email: maskInvitedEmail(result.item.email) },
+        }
+      },
     )
 
     // Invitation accept stays on the public /invitations path but requires a
