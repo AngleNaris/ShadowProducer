@@ -657,7 +657,8 @@ function FileExplorer({
   )
   const eligibleAssets = (assetsQuery.data?.items ?? []).filter(
     (asset) =>
-      asset.projectId === projectId &&
+      // 项目归属素材 + 团队资源库素材（未归属项目）都可显式加入审片
+      (asset.projectId === projectId || asset.projectId === null) &&
       asset.kind === "视频" &&
       asset.status === "ready" &&
       !asset.archived &&
@@ -1351,6 +1352,7 @@ function FileExplorer({
                           </strong>
                           <span className="mt-1 block truncate text-xs text-muted-foreground">
                             {asset.mimeType} · {formatAssetSize(asset.sizeBytes)}
+                            {asset.projectId === null ? " · 团队资源库" : ""}
                           </span>
                         </span>
                         {selected ? (
@@ -1362,7 +1364,8 @@ function FileExplorer({
                 </div>
               ) : (
                 <div className="grid min-h-32 place-items-center p-5 text-center text-xs leading-5 text-muted-foreground">
-                  当前项目没有可添加的已入库视频素材
+                  当前项目与团队资源库中没有可添加的已入库视频素材；
+                  请先在资源库上传视频并等待处理完成。
                 </div>
               )}
             </div>

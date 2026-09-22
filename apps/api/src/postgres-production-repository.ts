@@ -2031,12 +2031,27 @@ export class PostgresProductionRepository implements ProductionRepository {
       )
       if (replay) return { item: replay, replayed: true }
 
+      const project = await transaction
+        .selectFrom("projects")
+        .select(["id", "team_id"])
+        .where("id", "=", command.projectId)
+        .executeTakeFirst()
+      if (!project) return { kind: "not_found" } as const
+
       const source = await transaction
         .selectFrom("team_assets")
         .select(["id", "kind", "status", "object_key"])
         .where("id", "=", command.assetId)
-        .where("project_id", "=", command.projectId)
+        .where("team_id", "=", project.team_id)
         .where("archived_at", "is", null)
+        .where((expression) =>
+          expression.or([
+            // 项目归属素材
+            expression("project_id", "=", command.projectId),
+            // 团队资源库素材（未归属项目）：项目成员显式加入审片时可用
+            expression("project_id", "is", null),
+          ]),
+        )
         .executeTakeFirst()
       if (!source) return { kind: "not_found" } as const
       if (source.kind !== "视频" || source.status !== "ready" || !source.object_key) {

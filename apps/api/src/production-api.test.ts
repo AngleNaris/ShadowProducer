@@ -263,6 +263,14 @@ class MemoryProductionRepository implements ProductionRepository {
       archived: true,
       objectKey: "north/winter-coffee/review-archived.mp4",
     },
+    {
+      id: "asset-review-team-library",
+      projectId: null,
+      kind: "视频",
+      status: "ready",
+      archived: false,
+      objectKey: "north/team-library/review-team.mp4",
+    },
   ]
   private readonly callSheetReceipts = new Map<string, CallSheet>()
   private readonly callSheetPublishReceipts = new Map<
@@ -1179,7 +1187,7 @@ class MemoryProductionRepository implements ProductionRepository {
     const source = this.reviewSources.find(
       (item) =>
         item.id === command.assetId &&
-        item.projectId === command.projectId &&
+        (item.projectId === command.projectId || item.projectId === null) &&
         !item.archived,
     )
     if (!source) return { kind: "not_found" } as const
@@ -3213,7 +3221,51 @@ describe("production workflow API", () => {
     )
     expect(repository.reviewFiles).toHaveLength(2)
   })
+  it("creates a review version from a team-library video asset of the same team", async () => {
+    const { app, repository } = await createTestApp()
+    const request = {
+      method: "POST" as const,
+      url: "/v1/projects/winter-coffee/review-files",
+      headers: writerHeaders,
+      payload: {
+        assetId: "asset-review-team-library",
+        name: "团队库成片",
+        version: "v1",
+        idempotencyKey: "review-file-create-team-1",
+      },
+    }
+    const created = await app.inject(request)
+    const readback = await app.inject({
+      method: "GET",
+      url: "/v1/projects/winter-coffee/review-files",
+      headers: writerHeaders,
+    })
 
+    expect(created.statusCode).toBe(201)
+    expect(created.json()).toMatchObject({
+      replayed: false,
+      item: {
+        assetId: "asset-review-team-library",
+        name: "团队库成片",
+        version: "v1",
+        type: "video",
+        status: "待审阅",
+      },
+    })
+    expect(readback.json().items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ assetId: "asset-review-team-library" }),
+      ]),
+    )
+    // 素材全局只能挂载一个审片版本
+    const duplicate = await app.inject({
+      ...request,
+      payload: { ...request.payload, idempotencyKey: "review-file-create-team-2" },
+    })
+    expect(duplicate.statusCode).toBe(409)
+    expect(duplicate.json().code).toBe("REVIEW_FILE_ALREADY_EXISTS")
+    expect(repository.reviewFiles).toHaveLength(2)
+  })
   it("rejects invalid review sources and requires project write access", async () => {
     const { app } = await createTestApp()
     const requestFor = (assetId: string, idempotencyKey: string) => ({
